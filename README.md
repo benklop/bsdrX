@@ -1,6 +1,6 @@
 # bsdrX — cast any screen into a Bigscreen VR headset
 
-**Version 0.2.1** · Linux · Windows · macOS · Android
+**Version 0.3.0-alpha** · Linux · Windows · macOS · Android
 
 **bsdrX** is a clean-room **Bigscreen Remote Desktop** agent. It turns a PC — or an
 Android device — into a Bigscreen Remote Desktop *host*: it casts your **screen and
