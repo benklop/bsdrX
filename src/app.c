@@ -184,7 +184,7 @@ void bsdr_app_init(bsdr_app *a) {
     a->quest_bitrate = 8000000;
     a->bitrate_override = 0;   /* 0 = follow the headset; web UI can force a value */
     a->res_w = 0;             /* width auto-derived from the desktop aspect ratio */
-    a->res_h = 720;           /* 720p default; the headset overrides via PUT /device */
+    a->res_h = 1080;          /* 1080p default so the first open matches the Quest; bitrate retunes in place */
 }
 
 /* Effective encode bitrate = the web override if set, else what the headset asked for, then bounded
@@ -486,6 +486,12 @@ void bsdr_app_unpair_now(bsdr_app *a) {
     bsdr_cloud_stream *to_stop = unpair_finalize_locked(a);
     bsdr_mutex_unlock(a->lock);
     if (to_stop) bsdr_cloud_stream_stop(to_stop);
+}
+
+void bsdr_app_lan_capture_dead(bsdr_app *a) {
+    if (!a) return;
+    bsdr_app_set_streaming(a, false);
+    bsdr_app_unpair_now(a);   /* coupled share has no frames — don't resume a hollow stream */
 }
 
 void bsdr_app_set_streaming(bsdr_app *a, bool streaming) {
@@ -1347,9 +1353,9 @@ static void session_clear(void) {
     if (session_path(path, sizeof(path))) remove(path);
 }
 
-void bsdr_app_login(bsdr_app *a, const char *email, const char *password) {
+bool bsdr_app_login(bsdr_app *a, const char *email, const char *password) {
     bsdr_mutex_lock(a->lock);
-    snprintf(a->cloud_email, sizeof(a->cloud_email), "%s", email);
+    snprintf(a->cloud_email, sizeof(a->cloud_email), "%s", email ? email : "");
     snprintf(a->cloud_msg, sizeof(a->cloud_msg), "logging in...");
     bsdr_mutex_unlock(a->lock);
 
@@ -1358,7 +1364,7 @@ void bsdr_app_login(bsdr_app *a, const char *email, const char *password) {
     char name[128] = "", osid[80] = "";
     if (ok) {
         bsdr_cloud_account(bsdr_cloud_api_key(), res.access_token, name, sizeof(name));
-        bsdr_cloud_my_socialid(res.access_token, osid, sizeof osid);   /* owner = the primary account */
+        bsdr_cloud_my_socialid(res.access_token, osid, sizeof osid, 0);   /* owner = /rooms socialId */
     }
 
     bsdr_mutex_lock(a->lock);
@@ -1381,6 +1387,7 @@ void bsdr_app_login(bsdr_app *a, const char *email, const char *password) {
         bsdr_mutex_unlock(a->lock);
         if (!ws) BSDR_WARN("bsdr.app", "cloud presence WS did not connect (login OK)");
     }
+    return ok;
 }
 
 /* Restore a persisted session at startup: validate the saved access token (renew via the refresh
@@ -1441,7 +1448,7 @@ bool bsdr_app_restore_session(bsdr_app *a) {
      * (and re-log any server error) on every launch even though it never changes. */
     char osid[80] = "";
     bsdr_acl_get_owner_social_id(a->acl, osid, sizeof osid);
-    if (!osid[0]) bsdr_cloud_my_socialid(access, osid, sizeof osid);
+    if (!osid[0]) bsdr_cloud_my_socialid(access, osid, sizeof osid, 0);
     bsdr_acl_set_owner(a->acl, osid, a->cloud_name); bsdr_app_acl_save(a);
     bsdr_cloud_ws *ws = bsdr_cloud_ws_open(a->access_token, 0);
     bsdr_mutex_lock(a->lock);
@@ -1488,7 +1495,7 @@ static void bot_session_save(bsdr_app *a) {
 }
 static void bot_session_clear(void) { char p[600]; if (bot_session_path(p, sizeof(p))) remove(p); }
 
-void bsdr_app_bot_login(bsdr_app *a, const char *email, const char *password) {
+bool bsdr_app_bot_login(bsdr_app *a, const char *email, const char *password) {
     bsdr_mutex_lock(a->lock);
     snprintf(a->bot_email, sizeof(a->bot_email), "%s", email);
     snprintf(a->bot_msg, sizeof(a->bot_msg), "logging in...");
@@ -1511,7 +1518,7 @@ void bsdr_app_bot_login(bsdr_app *a, const char *email, const char *password) {
     bsdr_mutex_unlock(a->lock);
 
     if (ok) {
-        char sid[80] = ""; bsdr_cloud_my_socialid(res.access_token, sid, sizeof sid);
+        char sid[80] = ""; bsdr_cloud_my_socialid(res.access_token, sid, sizeof sid, 1);
         bsdr_mutex_lock(a->lock); snprintf(a->bot_social_id, sizeof a->bot_social_id, "%s", sid); bsdr_mutex_unlock(a->lock);
         bsdr_acl_set_bot(a->acl, sid, a->bot_name);   /* bot identity + default wake word (its name) */
         bsdr_app_acl_save(a);
@@ -1522,6 +1529,7 @@ void bsdr_app_bot_login(bsdr_app *a, const char *email, const char *password) {
         bsdr_mutex_lock(a->lock); a->bot_ws = ws; bsdr_mutex_unlock(a->lock);
         BSDR_INFO("bsdr.app", "bot account logged in as %s (socialId=%s)", name[0] ? name : email, sid[0] ? sid : "?");
     }
+    return ok;
 }
 
 void bsdr_app_bot_restore(bsdr_app *a) {
@@ -1686,7 +1694,7 @@ bool bsdr_app_bot_join_room(bsdr_app *a) {
     snprintf(mode,     sizeof mode,     "%s", a->bot_mode[0] ? a->bot_mode : "audio");
     bsdr_mutex_unlock(a->lock);
     if (!have) { bot_set_msg(a, false, NULL, "need BOTH the host and the bot logged in"); return false; }
-    if (!bot_sid[0]) { bsdr_cloud_my_socialid(bot_tok, bot_sid, sizeof bot_sid);
+    if (!bot_sid[0]) { bsdr_cloud_my_socialid(bot_tok, bot_sid, sizeof bot_sid, 1);
         bsdr_mutex_lock(a->lock); snprintf(a->bot_social_id, sizeof a->bot_social_id, "%s", bot_sid); bsdr_mutex_unlock(a->lock); }
 
     /* host's current room + its join policy */
@@ -1733,7 +1741,7 @@ bool bsdr_app_bot_join_room(bsdr_app *a) {
      * needs invite staging (the old code mis-read this 403 as "need a RoomInvite"). */
     if (!ok && (peer.http_status == 401 || peer.http_status == 403) && bot_renew_token(a)) {
         bsdr_mutex_lock(a->lock); snprintf(bot_tok, sizeof bot_tok, "%s", a->bot_access_token); bsdr_mutex_unlock(a->lock);
-        if (!bot_sid[0]) { bsdr_cloud_my_socialid(bot_tok, bot_sid, sizeof bot_sid);
+        if (!bot_sid[0]) { bsdr_cloud_my_socialid(bot_tok, bot_sid, sizeof bot_sid, 1);
             bsdr_mutex_lock(a->lock); snprintf(a->bot_social_id, sizeof a->bot_social_id, "%s", bot_sid); bsdr_mutex_unlock(a->lock); }
         memset(&peer, 0, sizeof peer);
         ok = bsdr_cloud_join_room(bot_tok, room.room_id, &peer);
@@ -1750,7 +1758,7 @@ bool bsdr_app_bot_join_room(bsdr_app *a) {
         int found = bsdr_cloud_find_room_invite(bot_tok, nid, sizeof nid, inv_room, sizeof inv_room);
         if (!found) {
             /* No pending invite -> try to send one host->bot. Needs the bot socialId (best-effort). */
-            if (!bot_sid[0]) { bsdr_cloud_my_socialid(bot_tok, bot_sid, sizeof bot_sid);
+            if (!bot_sid[0]) { bsdr_cloud_my_socialid(bot_tok, bot_sid, sizeof bot_sid, 1);
                 bsdr_mutex_lock(a->lock); snprintf(a->bot_social_id, sizeof a->bot_social_id, "%s", bot_sid); bsdr_mutex_unlock(a->lock); }
             if (!bot_sid[0]) { bot_set_msg(a, false, room.room_id,
                 "join refused (HTTP %d): the bot isn't authorized and its socialId could not be fetched (GET /social/profile failed). INVITE it to the room from the Bigscreen app, then click Join again.",
@@ -2375,12 +2383,12 @@ unsigned bsdr_app_select_gen(bsdr_app *a) {
 
 void bsdr_app_select_quest(bsdr_app *a, const char *ip) {
     bsdr_mutex_lock(a->lock);
-    int changed = strcmp(a->selected_quest_ip, ip ? ip : "") != 0;
     snprintf(a->selected_quest_ip, sizeof(a->selected_quest_ip), "%s", ip ? ip : "");
     /* reselecting a blocked Quest lifts the operator-disconnect block */
     if (ip && ip[0] && strcmp(a->blocked_quest_ip, ip) == 0)
         a->blocked_quest_ip[0] = '\0';
-    if (changed) a->select_gen++;   /* agent switches the active stream to the new headset */
+    /* Use on a real IP always restarts pair+capture (same headset after a dead session included). */
+    if (ip && ip[0]) a->select_gen++;
     bsdr_mutex_unlock(a->lock);
     BSDR_INFO("bsdr.app", "selected Quest: %s", ip && ip[0] ? ip : "(any)");
 }

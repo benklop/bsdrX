@@ -104,6 +104,27 @@ void bsdr_capture_info(bsdr_capture *c, int *w, int *h, const char **enc);
  * keyframe to a newly-joined cloud consumer instead of making it wait for the next scheduled GOP. */
 void bsdr_capture_force_keyframe(bsdr_capture *c);
 
+/* Live reconfig policy (no DBus): quality retunes the encoder; a region/window change reopens
+ * capture (persist restore_token so the picker is not reshown). Portal cancel/timeout is never
+ * fatal to the LAN worker — keep the previous capture, or retry later if there isn't one. */
+enum { BSDR_RECONFIG_NONE = 0, BSDR_RECONFIG_RETUNE = 1, BSDR_RECONFIG_REOPEN = 2 };
+static inline int bsdr_live_reconfig_kind(int region_changed, int quality_changed) {
+    if (region_changed) return BSDR_RECONFIG_REOPEN;
+    if (quality_changed) return BSDR_RECONFIG_RETUNE;
+    return BSDR_RECONFIG_NONE;
+}
+static inline int bsdr_live_reconfig_fatal(int reopen_failed, int have_prev_capture) {
+    (void)reopen_failed; (void)have_prev_capture;
+    return 0;
+}
+
+/* Retune bitrate on the live encoder without tearing down the capture source (PipeWire portal). */
+int bsdr_capture_retune(bsdr_capture *c, int bitrate);
+
+/* Abort a blocking portal picker so Disconnect can join the LAN worker. */
+void bsdr_capture_cancel_open(void);
+void bsdr_capture_cancel_open_clear(void);
+
 /* ---- File-source playback controls (no-ops unless opened with cfg.input_file) ---- */
 /* Seek to a fraction (0..1) of the file. Thread-safe wrt bsdr_capture_frame. */
 void bsdr_capture_seek(bsdr_capture *c, double frac);

@@ -78,6 +78,7 @@ typedef struct {
     char user_type[24];                /* room adminSettings.preferredUserType (Anyone/VerifiedUsersOnly/
                                         * FriendsOnly/AdminsOnly) — drives the bot-join decision tree */
     int  http_status;                  /* GET /rooms HTTP status (401/403 => token expired) */
+    char social_id[80];                /* ownerSocialProfile.socialId (companion /rooms; not Friends) */
 } bsdr_cloud_screen;
 
 /* Log in; fills `out`. Returns out->ok. `client_mode`: 0 = COMPANION (host account — companion key,
@@ -143,8 +144,8 @@ typedef struct { char notif_id[96]; char username[64]; char social_id[80]; } bsd
 int bsdr_cloud_list_friend_requests(const char *access_token, bsdr_friend_req *out, int cap);
 
 /* --- second-account "bot" room-join helpers (invite -> accept -> join; see bsdrx-bot-join-room-policy) --- */
-/* GET /auth/account -> the caller's own socialId (needed to invite it). Returns true + fills out. */
-bool bsdr_cloud_my_socialid(const char *access_token, char *out, size_t cap);
+/* socialId: host (client_mode=0) from GET /rooms; bot (1) from Friends /social/profile. */
+bool bsdr_cloud_my_socialid(const char *access_token, char *out, size_t cap, int client_mode);
 /* POST /social/notification {recipientSocialId,notificationType,version} -> invite/knock. type e.g.
  * "RoomInvite" or "FriendRequest". Returns the HTTP status (or -1). The server attaches the caller's
  * current room to a RoomInvite. */

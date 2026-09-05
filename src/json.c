@@ -97,6 +97,7 @@ bool bsdr_json_get_double(const char *json, const char *key, double *out) {
 }
 
 int bsdr_json_escape(char *out, size_t outlen, const char *s) {
+    if (!s) s = "";
     size_t o = 0;
     for (const char *p = s; *p; p++) {
         const char *esc = NULL;

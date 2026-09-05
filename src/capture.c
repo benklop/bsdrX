@@ -157,6 +157,18 @@ struct bsdr_capture {
  * to a newly-joined cloud consumer (which otherwise waits for the next scheduled GOP IDR). */
 void bsdr_capture_force_keyframe(bsdr_capture *c) { if (c) c->force_key = 1; }
 
+int bsdr_capture_retune(bsdr_capture *c, int bitrate) {
+    if (!c || !c->enc || bitrate <= 0) return -1;
+    c->enc->bit_rate = bitrate;
+    c->enc->rc_max_rate = (int64_t)bitrate * 2;
+    c->enc->rc_buffer_size = (int64_t)bitrate * 2;
+    c->force_key = 1;
+    return 0;
+}
+
+void bsdr_capture_cancel_open(void) { bsdr_pw_capture_cancel(); }
+void bsdr_capture_cancel_open_clear(void) { bsdr_pw_capture_cancel_clear(); }
+
 /* Apply a pending force-keyframe request to the frame about to be encoded, then clear it. Reused
  * AVFrames keep their pict_type between calls, so we must reset to NONE when not forcing. */
 static void maybe_force_key(struct bsdr_capture *c, AVFrame *f) {

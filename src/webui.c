@@ -1001,8 +1001,8 @@ static void handle(struct bsdr_webui *w, bsdr_socket_t c, const char *method,
         char email[128] = "", pw[128] = "";
         bsdr_json_get_str(body, "email", email, sizeof(email));
         bsdr_json_get_str(body, "password", pw, sizeof(pw));
-        bsdr_app_login(a, email, pw);                 /* blocking HTTPS */
-        respond(c, 200, "application/json", "{\"ok\":true}", 11);
+        bool ok = bsdr_app_login(a, email, pw);       /* blocking HTTPS */
+        respond(c, 200, "application/json", ok ? "{\"ok\":true}" : "{\"ok\":false}", ok ? 11 : 12);
     } else if (strcmp(method, "POST") == 0 && strcmp(path, "/api/logout") == 0) {
         bsdr_app_logout(a);
         respond(c, 200, "application/json", "{\"ok\":true}", 11);
@@ -1010,8 +1010,8 @@ static void handle(struct bsdr_webui *w, bsdr_socket_t c, const char *method,
         char email[128] = "", pw[128] = "";
         bsdr_json_get_str(body, "email", email, sizeof(email));
         bsdr_json_get_str(body, "password", pw, sizeof(pw));
-        bsdr_app_bot_login(a, email, pw);             /* blocking HTTPS (second account) */
-        respond(c, 200, "application/json", "{\"ok\":true}", 11);
+        bool ok = bsdr_app_bot_login(a, email, pw);   /* blocking HTTPS (second account) */
+        respond(c, 200, "application/json", ok ? "{\"ok\":true}" : "{\"ok\":false}", ok ? 11 : 12);
     } else if (strcmp(method, "POST") == 0 && strcmp(path, "/api/bot/logout") == 0) {
         bsdr_app_bot_logout(a);
         respond(c, 200, "application/json", "{\"ok\":true}", 11);

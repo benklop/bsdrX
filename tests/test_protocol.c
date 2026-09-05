@@ -14,10 +14,14 @@
  * You should have received a copy of the GNU General Public License along with
  * this program. If not, see <https://www.gnu.org/licenses/>.
  */
-/* Unit tests for protocol header check, discovery buffer, and JSON helpers. */
+/* Unit tests for protocol header check, discovery buffer, JSON, pairing, reconfig, login. */
 #include "bsdr/protocol.h"
 #include "bsdr/discovery.h"
 #include "bsdr/json.h"
+#include "bsdr/capture.h"
+#include "bsdr/control.h"
+#include "bsdr/app.h"
+#include "bsdr/cloud.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -63,6 +67,47 @@ int main(void) {
     CHECK(bsdr_json_get_double(body, "fps", &d) && d == 90.0, "json_number");
     CHECK(bsdr_json_get_double(body, "x", &d) && d == -1.5, "json_negative");
     CHECK(!bsdr_json_get_str(body, "missing", val, sizeof(val)), "json_missing");
+
+    /* NULL-safe escape (login / rooms fields can be unset) */
+    char esc[16];
+    CHECK(bsdr_json_escape(esc, sizeof(esc), NULL) == 0 && esc[0] == '\0', "json_escape_null");
+
+    /* Finding 1: bitrate/resolution retunes; region reopens; cancel never kills the worker */
+    CHECK(bsdr_live_reconfig_kind(0, 1) == BSDR_RECONFIG_RETUNE, "reconfig_quality_retunes");
+    CHECK(bsdr_live_reconfig_kind(1, 1) == BSDR_RECONFIG_REOPEN, "reconfig_region_reopens");
+    CHECK(bsdr_live_reconfig_kind(0, 0) == BSDR_RECONFIG_NONE, "reconfig_none");
+    CHECK(!bsdr_live_reconfig_fatal(1, 1), "reconfig_fail_keeps_prev");
+    CHECK(!bsdr_live_reconfig_fatal(1, 0), "reconfig_fail_no_prev_retries");
+
+    /* Finding 2: host disconnect revokes the id; stale heartbeat is 410; /pair can succeed */
+    CHECK(bsdr_control_auth_status(1, "abc", "", "abc") == 0, "pair_auth_ok");
+    CHECK(bsdr_control_auth_status(0, "abc", "abc", "abc") == 410, "pair_auth_revoked");
+    CHECK(bsdr_control_auth_status(0, "", "", "abc") == 404, "pair_auth_none");
+    CHECK(bsdr_control_auth_status(1, "new", "old", "old") == 410, "pair_auth_stale_while_repaired");
+    CHECK(bsdr_control_auth_status(1, "new", "old", "zzz") == 403, "pair_auth_wrong_id");
+
+    /* Finding 3: Use on the already-selected IP after disconnect bumps gen and lifts the block */
+    {
+        bsdr_app app;
+        bsdr_app_init(&app);
+        unsigned g0 = bsdr_app_select_gen(&app);
+        bsdr_app_select_quest(&app, "192.168.4.58");
+        CHECK(bsdr_app_select_gen(&app) == g0 + 1, "select_first_bumps");
+        bsdr_app_select_quest(&app, "192.168.4.58");
+        CHECK(bsdr_app_select_gen(&app) == g0 + 2, "select_same_ip_restarts");
+        bsdr_app_block_quest(&app, "192.168.4.58");
+        bsdr_app_select_quest(&app, "192.168.4.58");
+        CHECK(bsdr_app_select_gen(&app) == g0 + 3, "select_after_block_bumps");
+        CHECK(app.blocked_quest_ip[0] == '\0', "select_lifts_block");
+    }
+
+    /* Finding 4: empty creds are not success; login reports failure */
+    {
+        bsdr_cloud_result res;
+        CHECK(!bsdr_cloud_login(0, "", "pw", &res) && !res.ok, "login_empty_email");
+        CHECK(!bsdr_cloud_login(0, "a@b.c", "", &res) && !res.ok, "login_empty_password");
+        CHECK(!bsdr_cloud_login(0, NULL, NULL, &res) && !res.ok, "login_null_creds");
+    }
 
     printf(failures ? "\nFAILED (%d)\n" : "\nOK - all protocol tests passed\n",
            failures);

@@ -66,4 +66,8 @@ int bsdr_pw_capture_read(bsdr_pw_capture *c, const uint8_t **out_frame,
 
 void bsdr_pw_capture_close(bsdr_pw_capture *c);
 
+/* Abort a blocking portal Request wait (Disconnect during the picker). */
+void bsdr_pw_capture_cancel(void);
+void bsdr_pw_capture_cancel_clear(void);
+
 #endif /* BSDR_CAPTURE_PIPEWIRE_H */

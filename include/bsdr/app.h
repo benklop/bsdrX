@@ -158,7 +158,7 @@ typedef struct bsdr_app {
     int quest_count;
     char selected_quest_ip[64];   /* "" => accept any */
     char blocked_quest_ip[64];    /* disconnected by operator; refused until reselected */
-    volatile unsigned select_gen; /* bumped when the operator picks a different headset */
+    volatile unsigned select_gen; /* bumped on every Use/select of a real IP (restarts pair+capture) */
     /* live connection */
     bool quest_paired;
     char quest_name[128];
@@ -386,7 +386,7 @@ void bsdr_app_set_faceswap_status(bsdr_app *a, const char *status);
 void bsdr_app_set_room_pcm_sink(bsdr_app *a, void (*cb)(void *, const int16_t *, int, int), void *user);
 
 /* cloud login (blocking HTTPS); updates cloud_* fields */
-void bsdr_app_login(bsdr_app *a, const char *email, const char *password);
+bool bsdr_app_login(bsdr_app *a, const char *email, const char *password);
 /* Restore a saved cloud session at startup (validate/renew the persisted token). Returns true
  * if we end up logged in (and the presence WS is (re)opened). */
 bool bsdr_app_restore_session(bsdr_app *a);
@@ -397,7 +397,7 @@ void bsdr_app_logout(bsdr_app *a);
 /* Second "bot" account (its own session/WS, no media). login/restore/logout mirror the host ones;
  * join_room makes the bot join the HOST's current room (so Room.participants > 1 unlocks the owner
  * mic). All blocking HTTPS, safe to call from the web-UI handler thread. */
-void bsdr_app_bot_login(bsdr_app *a, const char *email, const char *password);
+bool bsdr_app_bot_login(bsdr_app *a, const char *email, const char *password);
 void bsdr_app_bot_restore(bsdr_app *a);
 void bsdr_app_bot_logout(bsdr_app *a);
 bool bsdr_app_bot_join_room(bsdr_app *a);
@@ -472,6 +472,8 @@ void bsdr_app_cloud_tick(bsdr_app *a);
  * operator disconnect). A subsequent set_paired(true) cancels the pending teardown. */
 bool bsdr_app_unpair_grace_expired(bsdr_app *a);
 void bsdr_app_unpair_now(bsdr_app *a);
+/* LAN encoder died: stop a hollow coupled internet-share (don't leave isPresenting with 0 frames). */
+void bsdr_app_lan_capture_dead(bsdr_app *a);
 
 /* The single LAN encoder feeds each encoded access unit here (w/h = encoded resolution); forwarded
  * to the relay as plain RTP in COUPLED mode. No-op in --video-decoupled mode (relay self-captures). */

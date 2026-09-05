@@ -65,8 +65,15 @@ bool bsdr_control_expire_stale(bsdr_control *c);
 
 /* Operator-initiated drop: forget the paired device so it must re-pair.
  * Returns true if a device was actually forgotten. Does not fire callbacks —
- * the caller owns teardown (mirrors bsdr_control_expire_stale). */
+ * the caller owns teardown (mirrors bsdr_control_expire_stale). The old pairing
+ * id is revoked: stale /heartbeat gets 410 so the Quest drops "connected", and
+ * the next /pair is allowed. */
 bool bsdr_control_force_unpair(bsdr_control *c);
+
+/* HTTP status for a control request's pairing id: 0 = accept, 410 = revoked
+ * (host disconnect — Quest should re-pair), 404 = never paired, 403 = wrong id. */
+int bsdr_control_auth_status(int have_device, const char *cur_id,
+                             const char *revoked_id, const char *req_id);
 
 /* CSPRNG helpers (OpenSSL-backed) used for ids/codes. */
 void bsdr_gen_hex(char *out, size_t nbytes);     /* writes 2*nbytes hex + NUL */

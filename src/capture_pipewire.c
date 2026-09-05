@@ -20,6 +20,8 @@
 #ifndef BSDR_HAVE_PIPEWIRE
 /* ---- stub build (no libpipewire/dbus): Wayland portal capture unavailable ------------------- */
 int bsdr_pw_capture_available(void) { return 0; }
+void bsdr_pw_capture_cancel(void) {}
+void bsdr_pw_capture_cancel_clear(void) {}
 bsdr_pw_capture *bsdr_pw_capture_open(int w, int c, int *ow, int *oh, bsdr_pw_format *f) {
     (void)w; (void)c; (void)ow; (void)oh; (void)f; return (bsdr_pw_capture *)0;
 }
@@ -181,6 +183,12 @@ static void oa_bool(DBusMessageIter *dict, const char *key, int val) {
     dbus_message_iter_close_container(&e, &v);
     dbus_message_iter_close_container(dict, &e);
 }
+static char g_restore_token[512];
+static volatile int g_pw_cancel;
+
+void bsdr_pw_capture_cancel(void) { g_pw_cancel = 1; }
+void bsdr_pw_capture_cancel_clear(void) { g_pw_cancel = 0; }
+
 static void fresh_token(char *out, size_t cap) {
     snprintf(out, cap, "bsdr%u", ++g_token_seq);
 }
@@ -206,9 +214,10 @@ static DBusMessage *portal_request(DBusConnection *conn, DBusMessage *call, uint
     dbus_connection_flush(conn);
     dbus_message_unref(reply);
 
-    /* pump the bus for up to ~30 s waiting for the Response on this request path */
+    /* pump the bus for up to ~30 s; abort immediately if Disconnect cancelled the picker */
     DBusMessage *out = NULL;
     for (int spins = 0; spins < 3000 && !out; spins++) {
+        if (g_pw_cancel) { BSDR_INFO("bsdr.pw", "portal: cancelled"); break; }
         if (!dbus_connection_read_write_dispatch(conn, 10)) break;   /* disconnected */
         DBusMessage *m;
         while ((m = dbus_connection_pop_message(conn))) {
@@ -332,6 +341,8 @@ static int portal_screencast(DBusConnection *conn, int want_window, int cursor,
       oa_uint(&d, "types", want_window ? 2u : 1u);       /* 1=MONITOR, 2=WINDOW */
       oa_uint(&d, "cursor_mode", cursor ? 2u : 1u);      /* 1=hidden, 2=embedded */
       oa_bool(&d, "multiple", 0);
+      oa_uint(&d, "persist_mode", 2u);                   /* persist while this process runs */
+      if (g_restore_token[0]) oa_str(&d, "restore_token", g_restore_token);
       oa_close(&it, &d); }
     r = portal_request(conn, call, &resp, &results); dbus_message_unref(call);
     if (!r) return -1;
@@ -351,6 +362,9 @@ static int portal_screencast(DBusConnection *conn, int want_window, int cursor,
     if (resp != 0 || results_get_stream(results, node_id, w, h) != 0) {
         BSDR_WARN("bsdr.pw", "Start failed / no stream (resp=%u)", resp); dbus_message_unref(r); return -1;
     }
+    { char tok[sizeof g_restore_token];
+      if (results_get_str(results, "restore_token", tok, sizeof tok) == 0 && tok[0])
+          snprintf(g_restore_token, sizeof g_restore_token, "%s", tok); }
     dbus_message_unref(r);
     BSDR_INFO("bsdr.pw", "portal screencast: node %u size %dx%d", *node_id, *w, *h);
 

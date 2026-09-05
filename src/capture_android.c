@@ -294,6 +294,12 @@ int bsdr_android_capture_want(int *width, int *height, int *fps, int *bitrate) {
 /* Request a keyframe on the next encoded frame. On Android the encoder is Kotlin's MediaCodec, so we
  * just publish an edge the JNI bridge polls (bsdr_android_poll_keyframe); MediaCodec's periodic IDR
  * covers consumers until Kotlin wires the explicit sync-frame request. */
+int bsdr_capture_retune(bsdr_capture *c, int bitrate) {
+    (void)c; (void)bitrate; return 0;
+}
+void bsdr_capture_cancel_open(void) {}
+void bsdr_capture_cancel_open_clear(void) {}
+
 void bsdr_capture_force_keyframe(bsdr_capture *c) {
     (void)c;
     if (!g_lock) return;

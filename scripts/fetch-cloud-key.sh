@@ -263,6 +263,10 @@ if [ "$client_mode" -eq 1 ]; then
         fi
     fi
     echo "fetch-cloud-key: unpacking Friends APK ..." >&2
+    [ -f "$pkg" ] && [ -s "$pkg" ] && archive_ok "$pkg" || {
+        echo "fetch-cloud-key: refusing to unpack missing/empty/invalid archive: $pkg" >&2
+        exit 1
+    }
     case "$pkg" in
         *.xapk)
             7z x -y -o"$work/xapk" "$pkg" >/dev/null

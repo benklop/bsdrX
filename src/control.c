@@ -47,6 +47,7 @@ struct bsdr_control {
     bsdr_mutex *lock;
     bool have_device;
     bsdr_paired_device device;
+    char revoked_pairing_id[97];  /* last host-disconnected id; stale heartbeats get 410 */
     int pair_fails;            /* consecutive wrong pairing-code attempts (brute-force guard) */
     time_t pair_lock_until;    /* reject /pair until this time after too many wrong codes */
     volatile int running;
@@ -115,9 +116,24 @@ static void split_path(const char *path, char *route, size_t rlen,
 }
 
 /* --------------------------------------------------------------- handlers ---*/
+int bsdr_control_auth_status(int have_device, const char *cur_id,
+                             const char *revoked_id, const char *req_id) {
+    if (req_id && have_device && cur_id && strcmp(cur_id, req_id) == 0) return 0;
+    if (req_id && revoked_id && revoked_id[0] && strcmp(revoked_id, req_id) == 0) return 410;
+    if (!have_device) return 404;
+    return 403;
+}
+
+static void forget_device_locked(struct bsdr_control *c) {
+    if (c->have_device && c->device.pairing_id[0])
+        snprintf(c->revoked_pairing_id, sizeof(c->revoked_pairing_id), "%s", c->device.pairing_id);
+    c->have_device = false;
+}
+
 static bool check_paired(struct bsdr_control *c, const char *id,
                          bsdr_paired_device *copy) {
-    bool ok = c->have_device && strcmp(c->device.pairing_id, id) == 0;
+    bool ok = bsdr_control_auth_status(c->have_device, c->device.pairing_id,
+                                       c->revoked_pairing_id, id) == 0;
     if (ok && copy) *copy = c->device;
     return ok;
 }
@@ -192,12 +208,15 @@ static void handle_request(struct bsdr_control *c, bsdr_socket_t conn,
     bsdr_paired_device snapshot;
     bsdr_mutex_lock(c->lock);
     if (!check_paired(c, id, &snapshot)) {
-        bool none = !c->have_device;
+        int st = bsdr_control_auth_status(c->have_device, c->device.pairing_id,
+                                          c->revoked_pairing_id, id);
         bsdr_mutex_unlock(c->lock);
         BSDR_DEBUG("bsdr.control", "%s %s from %s rejected: %s", req->method, route, remote_ip,
-                   none ? "not paired yet" : "pairing id mismatch (stale/duplicate session?)");
-        if (none) send_response_ka(conn, req->keep_alive, 404, "Not Found", "text/plain", "Need to pair first.");
-        else      send_response_ka(conn, req->keep_alive, 403, "Forbidden", "text/plain", "Pairing id was wrong.");
+                   st == 410 ? "pairing revoked (host disconnect)" :
+                   st == 404 ? "not paired yet" : "pairing id mismatch (stale/duplicate session?)");
+        if (st == 410) send_response_ka(conn, req->keep_alive, 410, "Gone", "text/plain", "Unpaired.");
+        else if (st == 404) send_response_ka(conn, req->keep_alive, 404, "Not Found", "text/plain", "Need to pair first.");
+        else send_response_ka(conn, req->keep_alive, 403, "Forbidden", "text/plain", "Pairing id was wrong.");
         return;
     }
 
@@ -264,7 +283,7 @@ static void handle_request(struct bsdr_control *c, bsdr_socket_t conn,
     }
     if (strcmp(req->method, "GET") == 0 && strcmp(route, "/unpair") == 0) {
         snapshot = c->device;
-        c->have_device = false;
+        forget_device_locked(c);
         bsdr_mutex_unlock(c->lock);
         BSDR_INFO("bsdr.control", "unpair %s", snapshot.device_name);
         if (c->cbs.on_unpair) c->cbs.on_unpair(&snapshot, c->cbs.user);
@@ -427,7 +446,7 @@ bool bsdr_control_force_unpair(bsdr_control *c) {
     if (had) {
         BSDR_INFO("bsdr.control", "operator disconnected device %s",
                   c->device.device_name);
-        c->have_device = false;
+        forget_device_locked(c);
     }
     bsdr_mutex_unlock(c->lock);
     return had;
@@ -441,7 +460,7 @@ bool bsdr_control_expire_stale(bsdr_control *c) {
         if (idle_ms > BSDR_FORGET_UNRESPONSIVE_DEVICE_MS) {
             BSDR_INFO("bsdr.control", "forgetting unresponsive device %s",
                       c->device.device_name);
-            c->have_device = false;
+            forget_device_locked(c);
             expired = true;
         }
     }

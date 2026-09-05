@@ -91,6 +91,7 @@ typedef struct {
     bsdr_mutex *lock;
     bsdr_thread *worker;
     volatile int stop;          /* per-session cancel/stop flag */
+    volatile int worker_done;   /* worker thread returned (capture death); join + allow Use restart */
     char remote_ip[64];
     /* Warm-resume across a room change: on /unpair we keep the (expensive VAAPI) video worker RUNNING for
      * a short grace instead of tearing it down, so a re-/start from the SAME headset (a room switch, same
@@ -774,7 +775,7 @@ static void lan_live_main(agent_t *a) {
          * Bounded so a headset that never sends /device still starts promptly at the default. */
         if (!is_cam && a->app) {
             int waited = 0;
-            while (waited < 2500 && g_running && bsdr_app_await_device_pending(a->app)) {
+            while (waited < 2500 && !a->stop && g_running && bsdr_app_await_device_pending(a->app)) {
                 bsdr_sleep_ms(50); waited += 50;
             }
             if (bsdr_app_await_device_pending(a->app))
@@ -783,7 +784,13 @@ static void lan_live_main(agent_t *a) {
         if (a->app) bsdr_app_get_quality(a->app, &qw, &qh, &qbr);
         if (qbr > 0) cfg.bitrate = qbr;
         cfg.out_width = qw > 0 ? qw : 0; cfg.out_height = qh > 0 ? qh : 0;
-        cap = bsdr_capture_open(&cfg);
+        while (!cap && !a->stop && g_running) {
+            cap = bsdr_capture_open(&cfg);
+            if (cap) break;
+            BSDR_WARN("bsdr.agent", "LAN: %s capture open failed — retrying (portal cancel is not fatal)",
+                      is_cam ? "webcam" : "desktop");
+            for (int i = 0; i < 50 && !a->stop && g_running; i++) bsdr_sleep_ms(100);
+        }
         if (!cap) { BSDR_ERROR("bsdr.agent", "LAN: %s capture/encode open failed",
                     is_cam ? "webcam" : "desktop");
                     bsdr_udp_close(&udp); return; }
@@ -1044,25 +1051,41 @@ static void lan_live_main(agent_t *a) {
                       cur_cpu ? "CPU/libx264" : "GPU/NVENC");
         }
         /* live re-config (desktop capture only): web UI window switch, or headset
-         * bitrate/resolution (PUT /device). A file source has fixed dimensions. */
+         * bitrate/resolution (PUT /device). Quality retunes the encoder (keeps PipeWire).
+         * Region change reopens make-before-break + persist_token; failure keeps the old capture. */
         if (!filemode && a->app) {
             int nx,ny,nw,nh; bsdr_app_get_region(a->app, &nx,&ny,&nw,&nh);
             int nqw,nqh,nqbr; bsdr_app_get_quality(a->app, &nqw,&nqh,&nqbr);
-            if (nx!=rx || ny!=ry || nw!=rw || nh!=rh ||
-                nqw!=qw || nqh!=qh || (nqbr>0 && nqbr!=qbr)) {
+            int region = (nx!=rx || ny!=ry || nw!=rw || nh!=rh);
+            int quality = (nqw!=qw || nqh!=qh || (nqbr>0 && nqbr!=qbr));
+            int kind = bsdr_live_reconfig_kind(region, quality);
+            if (kind == BSDR_RECONFIG_RETUNE) {
+                qw=nqw; qh=nqh; if (nqbr>0) qbr=nqbr;
+                /* ponytail: bitrate-only in place (encode size stays). Ceiling = 720↔1080 without
+                 * encoder rebuild; upgrade = reopen encoder+sws, keep the PipeWire fd. */
+                if (qbr>0) { cfg.bitrate = qbr; bsdr_capture_retune(cap, qbr); }
+                BSDR_INFO("bsdr.agent", "LAN live retune: %dx%d @ %d bps (portal kept)",
+                          qw, qh, cfg.bitrate);
+            } else if (kind == BSDR_RECONFIG_REOPEN) {
                 rx=nx; ry=ny; rw=nw; rh=nh; qw=nqw; qh=nqh; if (nqbr>0) qbr=nqbr;
-                bsdr_capture_close(cap);
-                cfg.x=rx; cfg.y=ry; cfg.width=rw; cfg.height=rh;
-                cfg.out_width = qw>0?qw:0; cfg.out_height = qh>0?qh:0;
-                if (qbr>0) cfg.bitrate = qbr;
-                webcam_cfg(a, &cfg);   /* keep the webcam source across the live reconfig reopen */
-                cap = bsdr_capture_open(&cfg);
-                if (!cap) { BSDR_ERROR("bsdr.agent", "LAN: re-open for reconfig failed"); break; }
-                if (a->overlay) bsdr_capture_set_overlay(cap, a->overlay);
-                bsdr_capture_info(cap,&w,&h,&enc);
-                tw = (uint16_t)((w+15)&~15); th = (uint16_t)((h+15)&~15);
-                BSDR_INFO("bsdr.agent", "LAN live reconfig: %s %dx%d @ %d bps (fresh keyframe)",
-                          (rw&&rh)?"window":"desktop", w, h, cfg.bitrate);
+                bsdr_capture_config ncfg = cfg;
+                ncfg.x=rx; ncfg.y=ry; ncfg.width=rw; ncfg.height=rh;
+                ncfg.out_width = qw>0?qw:0; ncfg.out_height = qh>0?qh:0;
+                if (qbr>0) ncfg.bitrate = qbr;
+                webcam_cfg(a, &ncfg);
+                bsdr_capture *newcap = bsdr_capture_open(&ncfg);
+                if (newcap) {
+                    bsdr_capture_close(cap); cap = newcap; cfg = ncfg;
+                    if (a->overlay) bsdr_capture_set_overlay(cap, a->overlay);
+                    bsdr_capture_info(cap,&w,&h,&enc);
+                    tw = (uint16_t)((w+15)&~15); th = (uint16_t)((h+15)&~15);
+                    BSDR_INFO("bsdr.agent", "LAN live reconfig: %s %dx%d @ %d bps (fresh keyframe)",
+                              (rw&&rh)?"window":"desktop", w, h, cfg.bitrate);
+                } else if (bsdr_live_reconfig_fatal(1, cap != NULL)) {
+                    BSDR_ERROR("bsdr.agent", "LAN: re-open for reconfig failed"); break;
+                } else {
+                    BSDR_WARN("bsdr.agent", "LAN: re-open for reconfig failed — keeping current capture");
+                }
             }
         }
         /* Serve an on-demand keyframe request (a new cloud joiner / RTCP PLI). In coupled mode this
@@ -1155,25 +1178,29 @@ static void lan_live_main(agent_t *a) {
     if (cap) bsdr_capture_close(cap);   /* drop the capture before the terminal it renders from */
     if (term) { a->term = NULL; bsdr_term_stop(term); term = NULL; }
     bsdr_udp_close(&udp);
+    if (a->app) bsdr_app_lan_capture_dead(a->app);
     BSDR_INFO("bsdr.agent", "LAN live stopped (%u NALs sent)", frame_num);
 }
 #endif /* BSDR_HAVE_CAPTURE */
 
 static void worker_main(void *arg) {
     agent_t *a = (agent_t *)arg;
-    if (a->replay_file) { replay_main(a); return; }   /* LAN replay (diagnostic) */
+    if (a->replay_file) { replay_main(a); a->worker_done = 1; return; }   /* LAN replay (diagnostic) */
 #ifdef BSDR_HAVE_CAPTURE
     lan_live_main(a);   /* the real, validated LAN remote-desktop protocol */
 #else
     BSDR_WARN("bsdr.agent", "this build has no capture support; nothing to stream");
 #endif
+    a->worker_done = 1;
 }
 
 static void teardown_session(agent_t *a) {
     bsdr_mutex_lock(a->lock);
     a->stop = 1;
+    bsdr_capture_cancel_open();   /* unblock a portal picker so join doesn't hang 30s */
     bsdr_thread *w = a->worker;
     a->worker = NULL;
+    a->worker_done = 0;
     bsdr_mutex_unlock(a->lock);
     if (w) bsdr_thread_join(w);   /* the worker owns its own capture/udp/injector */
 }
@@ -1194,6 +1221,8 @@ static void spawn_worker_locked(agent_t *a) {
         a->video_file = (strcmp(mode, "file") == 0 && a->src_path[0]) ? a->src_path : NULL;
     }
     a->stop = 0;
+    a->worker_done = 0;
+    bsdr_capture_cancel_open_clear();
     a->worker = bsdr_thread_start(worker_main, a);
 }
 
@@ -1573,7 +1602,7 @@ int bsdr_agent_run(const bsdr_agent_options *opt) {
             snprintf(sel, sizeof sel, "%s", app.selected_quest_ip);
             bsdr_mutex_unlock(app.lock);
             bsdr_mutex_lock(a.lock);
-            int running = a.worker != NULL;
+            int running = a.worker != NULL && !a.worker_done;
             int differ = sel[0] && strcmp(a.remote_ip, sel) != 0;
             bsdr_mutex_unlock(a.lock);
             if (sel[0] && (differ || !running)) {
@@ -1586,6 +1615,13 @@ int bsdr_agent_run(const bsdr_agent_options *opt) {
                 spawn_worker_locked(&a);
                 bsdr_mutex_unlock(a.lock);
             }
+        }
+        /* Capture death left a finished worker: join it so Use can restart (pointer would look "live"). */
+        {
+            bsdr_mutex_lock(a.lock);
+            int dead = a.worker && a.worker_done;
+            bsdr_mutex_unlock(a.lock);
+            if (dead) teardown_session(&a);
         }
 
 #if !defined(BSDR_PLATFORM_ANDROID)

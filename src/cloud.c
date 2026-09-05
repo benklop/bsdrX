@@ -128,6 +128,10 @@ static void make_system_info_b64(char *out, size_t cap, int client_mode);   /* d
 bool bsdr_cloud_login(int client_mode, const char *email, const char *password,
                       bsdr_cloud_result *out) {
     memset(out, 0, sizeof(*out));
+    if (!email || !email[0] || !password || !password[0]) {
+        snprintf(out->message, sizeof(out->message), "email and password required");
+        return false;
+    }
 
     char body[512];
     char emE[160], pwE[160];
@@ -345,6 +349,7 @@ bool bsdr_cloud_renew(const char *api_key, const char *refresh_token, bsdr_cloud
 }
 
 bool bsdr_cloud_get_rooms(const char *access_token, bsdr_cloud_screen *out) {
+    static int logged_no_screen;   /* one INFO line until a screen appears (body stays off INFO) */
     memset(out, 0, sizeof(*out));
     char req[4096];
     snprintf(req, sizeof(req),
@@ -363,9 +368,7 @@ bool bsdr_cloud_get_rooms(const char *access_token, bsdr_cloud_screen *out) {
     const char *body = strstr(resp, "\r\n\r\n");
     if (code / 100 != 2 || !body) { BSDR_WARN("bsdr.cloud", "GET /rooms -> HTTP %d", code); return false; }
     body += 4;
-    /* Raw body so we can verify the flat-key parse grabs the PRODUCE videoPort (mediaPeer),
-     * not a consume/other port, and inspect producerId fields. */
-    BSDR_INFO("bsdr.cloud", "GET /rooms body (%d B): %.6000s", (int)strlen(body), body);
+    bsdr_json_get_str(body, "socialId", out->social_id, sizeof(out->social_id));  /* ownerSocialProfile */
     /* flat-key search finds the first screen's mediaPeer/mediaServer fields */
     double v;
     if (bsdr_json_get_str(body, "ipAddress", out->media_ip, sizeof(out->media_ip)) &&
@@ -378,6 +381,7 @@ bool bsdr_cloud_get_rooms(const char *access_token, bsdr_cloud_screen *out) {
         bsdr_json_get_str(body, "userSessionId", out->session_id, sizeof(out->session_id));
         bsdr_json_get_str(body, "preferredUserType", out->user_type, sizeof(out->user_type));  /* bot-join policy */
         out->found = true;
+        logged_no_screen = 0;
         BSDR_INFO("bsdr.cloud", "rooms: relay %s video=%d audio=%d mic=%d data=%d session=%s",
                   out->media_ip, out->video_port, out->audio_port, out->mic_port,
                   out->data_port, out->session_id);
@@ -387,9 +391,10 @@ bool bsdr_cloud_get_rooms(const char *access_token, bsdr_cloud_screen *out) {
      * the companion/bsdrX only push media to an existing one — an empty screens[] is expected until
      * the operator shares the remote desktop INTO the room from the Quest. See the identity/screen
      * ownership notes: RDC "can't function as a stand alone streamer". */
-    BSDR_INFO("bsdr.cloud", "rooms: room has no shared screen yet — on the Quest, share the remote "
-              "desktop INTO this room (only the Quest can add it; the PC just pushes video to it)");
-    BSDR_DEBUG("bsdr.cloud", "GET /rooms body (%d B): %.1500s", (int)strlen(body), body);
+    if (!logged_no_screen) {
+        BSDR_INFO("bsdr.cloud", "rooms: no shared screen yet — share the remote desktop INTO the room from the Quest");
+        logged_no_screen = 1;
+    }
     return true;   /* connected OK, just no Quest-added screen in the room yet */
 }
 
@@ -570,16 +575,22 @@ static void url_encode_seg(const char *in, char *out, size_t cap) {
     out[o] = 0;
 }
 
-bool bsdr_cloud_my_socialid(const char *access_token, char *out, size_t cap) {
+bool bsdr_cloud_my_socialid(const char *access_token, char *out, size_t cap, int client_mode) {
     if (out && cap) out[0] = 0;
+    /* Host companion token: socialId is already on GET /rooms (ownerSocialProfile). Do not hit
+     * Friends /social/profile with a companion token — that 5xxs. */
+    if (!client_mode) {
+        bsdr_cloud_screen scr;
+        if (bsdr_cloud_get_rooms(access_token, &scr) && scr.social_id[0]) {
+            snprintf(out, cap, "%s", scr.social_id);
+            BSDR_INFO("bsdr.cloud", "my-socialid: %s (/rooms)", out);
+            return true;
+        }
+        BSDR_WARN("bsdr.cloud", "my-socialid: /rooms had no socialId; continuing without one");
+        return false;
+    }
     static char resp[16384];
-    /* GET /social/profile on the cloud-api2 host with the client key; socialId omitted from the path
-     * => "me", identified by x-access-token. The body is a SocialProfile carrying socialId. This is the
-     * ONLY endpoint that yields our own socialId: /auth/account returns a LocalAccount that structurally
-     * lacks socialId, and /info/username/{name} is a username-AVAILABILITY check (it 422s "already in
-     * use" for any existing name), not a profile lookup — so neither is a usable fallback. We therefore
-     * retry a transient 5xx a few times and otherwise give up gracefully; the owner/bot is still matched
-     * by username in the roster, so an unresolved socialId only weakens exact-socialId matching. */
+    /* GET /social/profile is Friends-only (client key + Friends access token). Used for the bot. */
     for (int attempt = 0; attempt < 3; attempt++) {
         if (attempt) bsdr_sleep_ms((unsigned)(500 * attempt));   /* 0 / 500 / 1000 ms backoff */
         char req[1024];
