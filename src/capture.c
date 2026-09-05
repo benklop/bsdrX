@@ -823,38 +823,43 @@ bsdr_capture *bsdr_capture_open(const bsdr_capture_config *cfg_in) {
         av_dict_free(&opts); goto fail;
     }
 #else
-#ifdef BSDR_HAVE_PIPEWIRE
-    /* Backend autodetect: x11grab can't see a native Wayland desktop (it grabs the XWayland root,
-     * usually blank), so on a Wayland session use the xdg-desktop-portal + PipeWire path; on a real
-     * Xorg session use x11grab. --x11 / --wayland force it. kmsgrab (explicit) always wins. */
-    {
-        int wayland = getenv("WAYLAND_DISPLAY") != NULL;
-        int use_pw = cfg.force_pipewire ? 1 : (cfg.force_x11 || cfg.use_kmsgrab) ? 0 : wayland;
-        if (use_pw) {
-            if (cap_open_pipewire(c, &cfg) == 0) { av_dict_free(&opts); goto have_input_pw; }
-            BSDR_WARN("bsdr.capture", "portal/PipeWire capture unavailable; falling back to x11grab");
-        }
-    }
-#endif
-    if (cfg.use_kmsgrab) cfg.use_vaapi = 1;   /* kmsgrab frames are DRM hw surfaces -> need the VAAPI path */
+    /* Linux desktop: kmsgrab (if requested and it actually opens) -> portal/PipeWire on Wayland
+     * -> x11grab. A leftover use_kmsgrab=1 in settings used to skip PipeWire entirely; the AppImage
+     * has no kmsgrab indev and no CAP_SYS_ADMIN, so that path died as "x11grab not available"
+     * without ever showing the portal picker. */
     char url[64];
     const AVInputFormat *ifmt;
     if (cfg.use_kmsgrab) {
         /* DRM/KMS capture: zero-copy, whole-CRTC (the region is cropped later by scale_vaapi). Needs
          * CAP_SYS_ADMIN on the binary (setcap cap_sys_admin+ep build/bsdr_agent) or root. card0 = the
-         * GPU driving the display (AMD here). Falls back to x11grab if it can't open. */
+         * GPU driving the display. */
         ifmt = av_find_input_format("kmsgrab");
         if (ifmt) {
             av_dict_set(&opts, "device", "/dev/dri/card0", 0);
             av_dict_set(&opts, "framerate", fr, 0);
-            if (avformat_open_input(&c->fmt, "", ifmt, &opts) == 0) goto input_ok;
-            BSDR_WARN("bsdr.capture", "kmsgrab failed (need CAP_SYS_ADMIN? setcap cap_sys_admin+ep) -> x11grab");
-            av_dict_free(&opts); opts = NULL;
-            av_dict_set(&opts, "framerate", fr, 0); av_dict_set(&opts, "draw_mouse", "1", 0);
-            if (cfg.width > 0 && cfg.height > 0) av_dict_set(&opts, "video_size", vsize, 0);
-            cfg.use_kmsgrab = 0;
+            if (avformat_open_input(&c->fmt, "", ifmt, &opts) == 0) {
+                cfg.use_vaapi = 1;   /* kmsgrab frames are DRM hw surfaces */
+                goto input_ok;
+            }
+            BSDR_WARN("bsdr.capture", "kmsgrab failed (need CAP_SYS_ADMIN? setcap cap_sys_admin+ep)");
+        } else {
+            BSDR_WARN("bsdr.capture", "kmsgrab not in this build");
+        }
+        av_dict_free(&opts); opts = NULL;
+        av_dict_set(&opts, "framerate", fr, 0); av_dict_set(&opts, "draw_mouse", "1", 0);
+        if (cfg.width > 0 && cfg.height > 0) av_dict_set(&opts, "video_size", vsize, 0);
+        cfg.use_kmsgrab = 0;
+    }
+#ifdef BSDR_HAVE_PIPEWIRE
+    {
+        const char *wd = getenv("WAYLAND_DISPLAY"), *st = getenv("XDG_SESSION_TYPE");
+        int wayland = (wd && wd[0]) || (st && strcmp(st, "wayland") == 0);
+        if (cfg.force_pipewire || (!cfg.force_x11 && wayland)) {
+            if (cap_open_pipewire(c, &cfg) == 0) { av_dict_free(&opts); goto have_input_pw; }
+            BSDR_WARN("bsdr.capture", "portal/PipeWire capture unavailable; falling back to x11grab");
         }
     }
+#endif
     ifmt = av_find_input_format("x11grab");
     if (!ifmt) { BSDR_ERROR("bsdr.capture", "x11grab not available"); av_dict_free(&opts); goto fail; }
     snprintf(url, sizeof(url), "%s+%d,%d", cfg.display, cfg.x, cfg.y);

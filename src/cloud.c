@@ -140,6 +140,14 @@ bool bsdr_cloud_login(int client_mode, const char *email, const char *password,
      * CLIENT (bot): client key + x-bigscreen-system-info on login, exactly like the Bigscreen Friends
      * app, so the session is first-class. */
     const char *key = client_mode ? bsdr_cloud_client_key() : bsdr_cloud_api_key();
+    if (!key[0]) {
+        snprintf(out->message, sizeof(out->message),
+                 "cloud API key is not configured (set %s)",
+                 client_mode ? "BSDR_CLOUD_CLIENT_KEY" : "BSDR_CLOUD_API_KEY");
+        BSDR_WARN("bsdr.cloud", "login skipped: %s is not set",
+                  client_mode ? "BSDR_CLOUD_CLIENT_KEY" : "BSDR_CLOUD_API_KEY");
+        return false;
+    }
     char sysinfo_b64[1024]; sysinfo_b64[0] = 0;
     if (client_mode) make_system_info_b64(sysinfo_b64, sizeof(sysinfo_b64), 1);
 
@@ -991,6 +999,17 @@ fail:
 void bsdr_cloud_ws_close(bsdr_cloud_ws *w) {
     if (!w) return;
     w->stop = 1;
+    /* Keepalive is blocked in BIO_read (SSL_MODE_AUTO_RETRY). shutdown() the fd so
+     * that read returns; otherwise logout joins forever and the single-threaded
+     * web UI never answers POST /api/logout. */
+    int fd = w->bio ? BIO_get_fd(w->bio, NULL) : -1;
+    if (fd >= 0) {
+#if defined(_WIN32)
+        shutdown((SOCKET)fd, SD_BOTH);
+#else
+        shutdown(fd, SHUT_RDWR);
+#endif
+    }
     if (w->thr) bsdr_thread_join(w->thr);
     BIO_free_all(w->bio); SSL_CTX_free(w->ctx); free(w);
 }

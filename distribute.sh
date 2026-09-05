@@ -206,7 +206,8 @@ build_linux(){
     ok "image $LINUX_IMAGE built"
   else ok "reusing image $LINUX_IMAGE"; fi
   log "  running build-linux-bundle.sh in container…"
-  if $DOCKER run --rm -e VERSION="$VERSION" -v "$ROOT":/src:ro -v "$DIST":/out "$LINUX_IMAGE" \
+  # :z so Fedora/podman SELinux relabels user_home_t -> container_file_t (else: Permission denied)
+  if $DOCKER run --rm -e VERSION="$VERSION" -v "$ROOT":/src:ro,z -v "$DIST":/out:z "$LINUX_IMAGE" \
         bash /src/scripts/build-linux-bundle.sh; then
     vmv "bsdrX.zip" "bsdrX-$VERSION.zip"
     vmv "bsdrX-x86_64.AppImage" "bsdrX-$VERSION-x86_64.AppImage"
@@ -253,7 +254,7 @@ build_osx(){
     ok "image $OSX_IMAGE built"
   else ok "reusing image $OSX_IMAGE"; fi
   log "  running build-osx-bundle.sh in container…"
-  if $DOCKER run --rm -e VERSION="$VERSION" -v "$ROOT":/src:ro -v "$DIST":/out "$OSX_IMAGE" \
+  if $DOCKER run --rm -e VERSION="$VERSION" -v "$ROOT":/src:ro,z -v "$DIST":/out:z "$OSX_IMAGE" \
         bash /src/scripts/build-osx-bundle.sh; then
     vmv "bsdrX-osx.zip" "bsdrX-osx-$VERSION.zip"
     record osx OK "$(secs $((SECONDS-t0)))"

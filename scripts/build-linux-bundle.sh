@@ -4,7 +4,7 @@
 #   * a .deb package (installs to /opt/bsdrX + a /usr/bin symlink + the uinput udev rule)
 #   * bsdrX.zip containing both, plus README.md and LICENSE.md
 #
-# Designed to run inside the bsdrx-linux-deps build image (Ubuntu 20.04 = glibc 2.31,
+# Designed to run inside the bsdrx-linux-deps build image (Debian 12 = glibc 2.36,
 # with a private minimal ffmpeg + openssl3/x264/opus/srtp2/usrsctp/pcap under
 # $BSDRX_DEPS). See scripts/linux-bundle.Dockerfile. Example:
 #

@@ -18,6 +18,7 @@
 #include "bsdr/log.h"
 
 #include <openssl/x509v3.h>
+#include <stdlib.h>
 #ifdef __ANDROID__
 #  include <openssl/pem.h>
 #  include <dirent.h>
@@ -81,9 +82,28 @@ void bsdr_tls_configure_client(SSL_CTX *ctx, const char *host) {
     if (cacnt == 0) BSDR_WARN("bsdr.tls", "android: loaded 0 system CAs — TLS will fail");
     else BSDR_DEBUG("bsdr.tls", "android: loaded %d system CAs", cacnt);
 #else
-    if (SSL_CTX_set_default_verify_paths(ctx) != 1)
+    /* Bundled OpenSSL (AppImage/.deb) is built with --openssldir=/opt/bsdrx-deps/etc/ssl,
+     * which is empty/absent at runtime. set_default_verify_paths then "succeeds" with an
+     * empty store and every HTTPS call dies as "connect failed". Load the host bundle. */
+    SSL_CTX_set_default_verify_paths(ctx);
+    const char *env = getenv("SSL_CERT_FILE");
+    int loaded = (env && *env && SSL_CTX_load_verify_locations(ctx, env, NULL) == 1);
+    if (!loaded) {
+        static const char *const bundles[] = {
+            "/etc/ssl/certs/ca-certificates.crt", /* Debian/Ubuntu */
+            "/etc/pki/tls/certs/ca-bundle.crt",   /* Fedora/RHEL */
+            "/etc/ssl/ca-bundle.pem",
+            NULL
+        };
+        for (int i = 0; bundles[i]; i++) {
+            if (SSL_CTX_load_verify_locations(ctx, bundles[i], NULL) == 1) {
+                loaded = 1; break;
+            }
+        }
+    }
+    if (!loaded && SSL_CTX_load_verify_locations(ctx, NULL, "/etc/ssl/certs") != 1)
         BSDR_WARN("bsdr.tls", "could not load the system CA trust store; "
-                              "verification may fail (use --insecure-tls to override)");
+                              "HTTPS will fail (use --insecure-tls to override)");
 #endif
     if (host && *host) {
         /* Pin the certificate to the connection host (SAN/CN + hostname match). Doing this

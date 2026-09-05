@@ -17,6 +17,7 @@
 #   make check                    build + run the test suite
 #   make install                  install the host build to $(prefix) (DESTDIR ok)
 #   make clean / make distclean   remove build artifacts (+ config.mk)
+#   make appimage                 fetch companion+client keys + Linux AppImage (scripts/build-linux.sh)
 #
 # config.mk (written by ./configure) is optional; when absent, sensible host
 # defaults are detected below. Command-line overrides always win, which is how
@@ -277,7 +278,7 @@ else
   ALL_TESTS :=
 endif
 
-.PHONY: native all plugins require-full-media linux windows windows-media osx osxcross check install install_plugins uninstall clean distclean print-media-src
+.PHONY: native all plugins require-full-media linux appimage windows windows-media osx osxcross check install install_plugins uninstall clean distclean print-media-src
 
 # Default target: build from config.mk. `make` does NOT run ./configure — configure is the separate,
 # required readiness gate (run it first, and again after 'make distclean' or when deps/linking change).
@@ -412,6 +413,11 @@ $(BUILD)/bsdr_micrelay$(EXEEXT): tools/bsdr_micrelay.c src/micsniff_capture.c | 
 # for symmetry with the cross targets (make windows / make osxcross). Build into another dir with
 # `make BUILD=<dir>` (which propagates through `native` -> `all`).
 linux: native
+
+# AppImage + .deb: pull companion + Friends/client keys into cloud.h, then ./distribute.sh linux.
+# Distinct from `make linux` (native host compile). Extra args: make appimage -- --no-cache
+appimage:
+	scripts/build-linux.sh
 
 # `windows` = the full media-capable mingw build (was `windows-media`). Kept as an
 # alias so scripts/build-win-bundle.sh (make windows-media) keeps working.

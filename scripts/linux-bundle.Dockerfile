@@ -1,21 +1,21 @@
 # Build environment for scripts/build-linux-bundle.sh.
 #
-# Debian 11 "bullseye" (glibc 2.31) base — same low glibc floor as Ubuntu 20.04 so
-# the produced binaries run on 20.04+ / Debian 11+, but UNLIKE focal, bullseye ships
-# libpipewire-0.3-dev + libwayland-dev + wayland-scanner, so the AppImage gets real
-# Wayland desktop capture (xdg-desktop-portal + PipeWire) and the wlr-gamma-control
-# screen-blank instead of falling back to x11grab-only. Builds a PRIVATE, MINIMAL
-# ffmpeg (+ openssl3, x264, opus,
-# libsrtp2, usrsctp, libpcap) into /opt/bsdrx-deps — only the codecs/muxers/devices
-# bsdrX actually uses (H.264 via nvenc/x264, mjpeg screenshots, x11grab capture,
-# file demux + h264 bitstream filter), so the dependency graph stays tiny instead
-# of the ~200-lib tail a distro ffmpeg drags in. Also installs linuxdeploy +
+# Debian 12 "bookworm" (glibc 2.36) base — current Debian LTS (until 2028-06).
+# AppImage runs on Debian 12+ / Ubuntu 24.04+ (not 22.04: jammy is glibc 2.35).
+# Bookworm ships libpipewire-0.3-dev + libwayland-dev + wayland-scanner, so the
+# AppImage gets real Wayland desktop capture (xdg-desktop-portal + PipeWire) and
+# the wlr-gamma-control screen-blank instead of falling back to x11grab-only.
+# Builds a PRIVATE, MINIMAL ffmpeg (+ openssl3, x264, opus, libsrtp2, usrsctp,
+# libpcap) into /opt/bsdrx-deps — only the codecs/muxers/devices bsdrX actually
+# uses (H.264 via nvenc/x264, mjpeg screenshots, x11grab capture, file demux +
+# h264 bitstream filter), so the dependency graph stays tiny instead of the
+# ~200-lib tail a distro ffmpeg drags in. Also installs linuxdeploy +
 # appimagetool + dpkg-dev + zip so the bundle script can package in-place.
 #
 #   docker build -f scripts/linux-bundle.Dockerfile -t bsdrx-linux-deps scripts
 #   docker run --rm -v "$PWD":/src:ro -v "$PWD/dist":/out bsdrx-linux-deps \
 #           bash /src/scripts/build-linux-bundle.sh
-FROM debian:11-slim
+FROM debian:12-slim
 ENV DEBIAN_FRONTEND=noninteractive
 SHELL ["/bin/bash", "-c"]
 
@@ -35,7 +35,7 @@ ENV PKG_CONFIG_PATH=$PFX/lib/pkgconfig
 ENV LD_LIBRARY_PATH=$PFX/lib
 ENV PATH=$PFX/bin:$PATH
 
-# ---- OpenSSL 3 (20.04 ships 1.1) ----
+# ---- OpenSSL 3 (private prefix, not the distro copy) ----
 RUN set -eux; cd /tmp; \
     curl -fsSL https://github.com/openssl/openssl/releases/download/openssl-3.0.15/openssl-3.0.15.tar.gz | tar xz; \
     cd openssl-3.0.15; \

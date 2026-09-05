@@ -83,6 +83,76 @@ fi
 if [ -n "$host" ]; then AR=${host}-ar; else AR=ar; fi
 command -v "$CC" >/dev/null 2>&1 || { echo "configure: C compiler '$CC' not found" >&2; exit 1; }
 
+# --- distro (install-hint package names only; detection stays pkg-config) --
+# $pm is apt | dnf | empty (unknown -> print Debian and Fedora lines).
+pm=
+if [ -r /etc/os-release ]; then
+    _id=$(sed -n 's/^ID=//p' /etc/os-release | tr -d '"')
+    _like=$(sed -n 's/^ID_LIKE=//p' /etc/os-release | tr -d '"')
+    case " $_id $_like " in
+        *" fedora "*|*" rhel "*|*" centos "*) pm=dnf ;;
+        *" debian "*|*" ubuntu "*)             pm=apt ;;
+    esac
+fi
+if [ -z "$pm" ]; then
+    if command -v dnf >/dev/null 2>&1; then pm=dnf
+    elif command -v apt-get >/dev/null 2>&1; then pm=apt
+    fi
+fi
+# map_pkgs "debian-dev-names" [PM] — identity on apt/unknown; Fedora -devel names on dnf.
+# ffmpeg's seven -dev packages collapse to ffmpeg-free-devel (official Fedora; RPM Fusion's
+# ffmpeg-devel also satisfies pkg-config and adds x264/NVENC).
+map_pkgs() {
+    _in=$1
+    _to=${2:-$pm}
+    _out=
+    for _p in $_in; do
+        _m=$_p
+        case "$_to" in
+            dnf)
+                case "$_p" in
+                    libusrsctp-dev) _m=usrsctp-devel ;;
+                    libsrtp2-dev) _m=libsrtp-devel ;;
+                    libavcodec-dev|libavformat-dev|libavdevice-dev|libavutil-dev|libswscale-dev|libswresample-dev|libavfilter-dev)
+                        _m=ffmpeg-free-devel ;;
+                    libx11-dev) _m=libX11-devel ;;
+                    libopus-dev) _m=opus-devel ;;
+                    libpulse-dev) _m=pulseaudio-libs-devel ;;
+                    libpcap-dev) _m=libpcap-devel ;;
+                    libssl-dev) _m=openssl-devel ;;
+                    libpipewire-0.3-dev) _m=pipewire-devel ;;
+                    libdbus-1-dev) _m=dbus-devel ;;
+                    libwayland-dev|wayland-scanner) _m=wayland-devel ;;
+                    pkg-config) _m=pkgconf ;;
+                esac ;;
+        esac
+        case " $_out " in *" $_m "*) ;; *) _out="$_out $_m" ;; esac
+    done
+    echo "${_out# }"
+}
+print_install_hint() {
+    case "$pm" in
+        dnf) echo "    Fedora/RHEL:    sudo dnf install $(map_pkgs "$1" dnf)" >&2 ;;
+        apt) echo "    Debian/Ubuntu:  sudo apt-get install $1" >&2 ;;
+        *)
+            echo "    Debian/Ubuntu:  sudo apt-get install $1" >&2
+            echo "    Fedora/RHEL:    sudo dnf install $(map_pkgs "$1" dnf)" >&2 ;;
+    esac
+}
+# ponytail: table-driven map; this assert is the ceiling (add a case, extend the
+# expected string). Upgrade: a real distro matrix if we grow past apt/dnf.
+if [ "$(map_pkgs 'libusrsctp-dev libsrtp2-dev libavcodec-dev libavformat-dev libopus-dev libpulse-dev libpcap-dev libx11-dev libpipewire-0.3-dev libdbus-1-dev wayland-scanner libwayland-dev pkg-config' dnf)" != \
+    "usrsctp-devel libsrtp-devel ffmpeg-free-devel opus-devel pulseaudio-libs-devel libpcap-devel libX11-devel pipewire-devel dbus-devel wayland-devel pkgconf" ]; then
+    echo "configure: INTERNAL: Fedora package map produced unexpected output" >&2
+    exit 1
+fi
+
+if [ -z "$host" ] && ! command -v pkg-config >/dev/null 2>&1; then
+    echo "configure: ERROR: pkg-config not found (needed to detect libraries)" >&2
+    print_install_hint "pkg-config"
+    exit 1
+fi
+
 EXEEXT=
 LDFLAGS_EXTRA=
 case "$target" in
@@ -139,13 +209,14 @@ fi
 # here would only defer the failure to `make`. An explicitly --disabled feature
 # that is missing is simply left off (no error).
 have_pkg() { pkg-config --exists "$@" 2>/dev/null; }
-# note_missing FEATURE "apt packages": disable FEATURE; error later iff it's required.
+# note_missing FEATURE "debian packages": disable FEATURE; error later iff it's required.
+# Package names are Debian-style internally and mapped at print time (Fedora -devel etc.).
 note_missing() {
     _feat=$1; _pkgs=$2
     eval "enable_$_feat=no"
     if eval "[ \"\$req_$_feat\" = yes ]"; then
         missing="$missing $_pkgs"
-        echo "configure: ERROR: $_feat deps missing -> need: $_pkgs" >&2
+        echo "configure: ERROR: $_feat deps missing -> need: $(map_pkgs "$_pkgs")" >&2
     else
         echo "configure: $_feat deps missing -> $_feat disabled (explicitly requested)"
     fi
@@ -189,11 +260,9 @@ if [ -n "$missing" ]; then
     echo "configure: required libraries are missing. bsdrX is a full-media build" >&2
     echo "           (desktop capture is mandatory), so these are not optional:" >&2
     echo "" >&2
-    echo "    $uniq_missing" >&2
+    echo "    $(map_pkgs "$uniq_missing")" >&2
     echo "" >&2
-    if command -v apt-get >/dev/null 2>&1; then
-        echo "    Debian/Ubuntu:  sudo apt-get install $uniq_missing" >&2
-    fi
+    print_install_hint "$uniq_missing"
     echo "" >&2
     echo "           (or pass --disable-video/--disable-audio/--disable-sctp to build" >&2
     echo "            without them — note the default 'make' target still requires media.)" >&2
@@ -248,7 +317,7 @@ if [ "$enable_video" = yes ] && [ "$target" = linux ]; then
         MEDIA_LIBS="$MEDIA_LIBS $(pkg $PKG_LIBS libpipewire-0.3 dbus-1 2>/dev/null)"
         echo "configure: Wayland capture = xdg-desktop-portal + PipeWire"
     else
-        echo "configure: Wayland capture OFF (install libpipewire-0.3-dev + libdbus-1-dev); x11grab/kmsgrab only"
+        echo "configure: Wayland capture OFF (install $(map_pkgs 'libpipewire-0.3-dev libdbus-1-dev')); x11grab/kmsgrab only"
     fi
 fi
 # --- Terminal source, PTY backend: vendored libvterm (third_party) + a pseudo-terminal ------------
@@ -275,7 +344,7 @@ if [ "$target" = linux ]; then
         WAYLAND_GAMMA=1
         echo "configure: Wayland privacy screen-blank = wlr-gamma-control"
     else
-        echo "configure: Wayland screen-blank OFF (need wayland-scanner + libwayland-dev); X11/Windows/macOS unaffected"
+        echo "configure: Wayland screen-blank OFF (need $(map_pkgs 'wayland-scanner libwayland-dev')); X11/Windows/macOS unaffected"
     fi
 fi
 if [ "$enable_audio" = yes ] && [ "$target" = macos ]; then
@@ -304,9 +373,7 @@ if [ "$enable_audio" = yes ] && [ "$target" = linux ]; then
     else
         echo "configure: ERROR: libpcap not found — it is a required build dependency." >&2
         echo "  Install it and re-run ./configure:" >&2
-        echo "    Debian/Ubuntu: sudo apt install libpcap-dev" >&2
-        echo "    Fedora:        sudo dnf install libpcap-devel" >&2
-        echo "    Arch:          sudo pacman -S libpcap" >&2
+        print_install_hint "libpcap-dev"
         exit 1
     fi
 fi

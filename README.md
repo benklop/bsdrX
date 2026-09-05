@@ -907,9 +907,13 @@ CMake is also supported:
 
 **Dependencies** (Debian/Ubuntu): `libssl-dev` (always); for media add `libsrtp2-dev`,
 ffmpeg (`libavcodec/avformat/avdevice/avutil/swscale-dev`), `libopus-dev`,
-`libpulse-dev`, `libusrsctp-dev`, `libpcap-dev` (required — owner-mic capture). NVENC
-needs the NVIDIA driver; desktop capture needs an X11 display. For the router companion:
-`make micrelay` (static, bundled libpcap).
+`libpulse-dev`, `libusrsctp-dev`, `libpcap-dev` (required — owner-mic capture).
+**Fedora/RHEL:** `openssl-devel`; for media add `libsrtp-devel`, `ffmpeg-free-devel`
+(or RPM Fusion `ffmpeg-devel` for x264/NVENC), `opus-devel`, `pulseaudio-libs-devel`,
+`usrsctp-devel`, `libpcap-devel`. Optional Wayland: `pipewire-devel` `dbus-devel`
+`wayland-devel` `libX11-devel` `libXtst-devel`. NVENC needs the NVIDIA driver; desktop
+capture needs an X11 display. For the router companion: `make micrelay` (static, bundled
+libpcap).
 
 ### macOS
 
@@ -1038,7 +1042,15 @@ Bigscreen cloud calls are authenticated with a Bigscreen **app key**
   ```
   `bsdr_cloud_api_key()` / `bsdr_cloud_client_key()` read these (falling back to compiled
   defaults, blank in the public build). Both keys are discoverable in Bigscreen's own
-  clients (the Remote Desktop client and the Bigscreen Friends app).
+  clients (the Remote Desktop client and the Bigscreen Friends app). To pull the
+  companion key out of the official RDC installer, and the client key out of
+  the Play Store Friends app (`com.bcrossappdev.bigscreenfriends`; needs
+  `apkeep`):
+
+  ```bash
+  eval "$(scripts/fetch-cloud-key.sh --export)"
+  eval "$(scripts/fetch-cloud-key.sh --export --client)"
+  ```
 
 ---
 

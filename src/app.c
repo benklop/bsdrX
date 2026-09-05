@@ -2184,6 +2184,7 @@ static bool app_renew_token(bsdr_app *a) {
     bsdr_cloud_result rr;
     if (!bsdr_cloud_renew(bsdr_cloud_api_key(), refresh, &rr)) { BSDR_WARN("bsdr.app", "cloud token renew failed"); return false; }
     bsdr_mutex_lock(a->lock);
+    if (!a->cloud_logged_in) { bsdr_mutex_unlock(a->lock); return false; }   /* logged out while HTTPS ran */
     snprintf(a->access_token, sizeof(a->access_token), "%s", rr.access_token);
     if (rr.refresh_token[0]) snprintf(a->refresh_token, sizeof(a->refresh_token), "%s", rr.refresh_token);
     bsdr_mutex_unlock(a->lock);
@@ -2204,6 +2205,7 @@ static bool bot_renew_token(bsdr_app *a) {
     bsdr_cloud_result rr;
     if (!bsdr_cloud_renew(bsdr_cloud_client_key(), refresh, &rr)) { BSDR_WARN("bsdr.app", "bot token renew failed"); return false; }
     bsdr_mutex_lock(a->lock);
+    if (!a->bot_logged_in) { bsdr_mutex_unlock(a->lock); return false; }   /* logged out while HTTPS ran */
     snprintf(a->bot_access_token, sizeof(a->bot_access_token), "%s", rr.access_token);
     if (rr.refresh_token[0]) snprintf(a->bot_refresh_token, sizeof(a->bot_refresh_token), "%s", rr.refresh_token);
     a->bot_token_ms = bsdr_now_ms();
