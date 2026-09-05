@@ -17,6 +17,7 @@
 #   make check                    build + run the test suite
 #   make install                  install the host build to $(prefix) (DESTDIR ok)
 #   make clean / make distclean   remove build artifacts (+ config.mk)
+#   make linux                    fetch companion+client keys + native host build
 #   make appimage                 fetch companion+client keys + Linux AppImage (scripts/build-linux.sh)
 #
 # config.mk (written by ./configure) is optional; when absent, sensible host
@@ -409,13 +410,15 @@ $(BUILD)/bsdr_micrelay$(EXEEXT): tools/bsdr_micrelay.c src/micsniff_capture.c | 
 # Every target is full-feature (capture+encode, audio, SCTP, SRTP). There is no
 # core-only build — see require-full-media above. Native `linux` autodetects the
 # host media deps; `windows` and `osxcross` pin them through their *_DEPS prefix.
-# On Linux `make linux` is just `make` — the native, config.mk-gated build into build/. It exists only
-# for symmetry with the cross targets (make windows / make osxcross). Build into another dir with
-# `make BUILD=<dir>` (which propagates through `native` -> `all`).
-linux: native
+# On Linux `make linux` injects companion + Friends/client keys into cloud.h, then is `make`
+# (native, config.mk-gated, into build/). Distinct from `make appimage` (docker AppImage + .deb).
+# Extra dir: `make BUILD=<dir> linux`.
+linux:
+	scripts/fetch-cloud-key.sh --inject
+	scripts/fetch-cloud-key.sh --inject --client
+	+$(MAKE) native
 
-# AppImage + .deb: pull companion + Friends/client keys into cloud.h, then ./distribute.sh linux.
-# Distinct from `make linux` (native host compile). Extra args: make appimage -- --no-cache
+# AppImage + .deb: same key inject, then ./distribute.sh linux. Extra args: make appimage -- --no-cache
 appimage:
 	scripts/build-linux.sh
 
