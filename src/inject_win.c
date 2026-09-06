@@ -195,11 +195,18 @@ void bsdr_injector_handle(bsdr_injector *inj, const bsdr_input_event *ev) {
             break;
         }
         case BSDR_EV_GAMEPAD:
-            BSDR_DEBUG("bsdr.inject", "gamepad event (needs ViGEmBus; not injected)");
+            bsdr_pad_emit((int)ev->u.gamepad.slot, &ev->u.gamepad);
             break;
     }
 }
 
 void bsdr_injector_destroy(bsdr_injector *inj) { free(inj); }
+
+void bsdr_pad_emit(int slot, const bsdr_gamepad *g) {
+    (void)g;
+    BSDR_DEBUG("bsdr.inject", "gamepad slot=%d (needs ViGEmBus; not injected)", slot);
+}
+void bsdr_pad_release(int slot) { (void)slot; }
+void bsdr_pad_close(int slot) { (void)slot; }
 
 #endif /* _WIN32 */

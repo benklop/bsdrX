@@ -15,6 +15,7 @@
  * this program. If not, see <https://www.gnu.org/licenses/>.
  */
 #include "bsdr/app.h"
+#include "bsdr/events.h"
 #include "bsdr/inject.h"
 #include "bsdr/compcontrol.h"   /* bsdr_cc_type/key/click/scroll for the input host services */
 #include "bsdr/cloud.h"
@@ -390,6 +391,8 @@ void bsdr_app_free(bsdr_app *a) {
     if (a->lock) bsdr_mutex_free(a->lock);
 }
 
+static int pad_blob_lookup(const char *blob, const char *ip);
+
 void bsdr_app_register_quest(bsdr_app *a, const char *ip) {
     bsdr_mutex_lock(a->lock);
     uint64_t now = bsdr_now_ms();
@@ -405,6 +408,7 @@ void bsdr_app_register_quest(bsdr_app *a, const char *ip) {
         snprintf(q->ip, sizeof(q->ip), "%s", ip);
         snprintf(q->name, sizeof(q->name), "Quest @ %s", ip);
         q->last_seen_ms = now;
+        q->pad_slot = pad_blob_lookup(a->quest_pads, ip);   /* 0 unless a saved assignment exists */
         BSDR_INFO("bsdr.app", "discovered Quest %s (%d total)", ip, a->quest_count);
     }
     bsdr_mutex_unlock(a->lock);
@@ -516,6 +520,127 @@ void bsdr_app_set_pointer_touch(bsdr_app *a, bool on) {
     bsdr_mutex_unlock(a->lock);
     bsdr_injector_touch_mode(on ? 1 : 0);
     settings_save(a);
+}
+
+static int pad_blob_lookup(const char *blob, const char *ip);   /* defined below */
+
+/* Caller holds a->lock. */
+static int live_headset_pad_unlocked(const bsdr_app *a) {
+    const char *ip = a->quest_ip[0] ? a->quest_ip :
+                     (a->selected_quest_ip[0] ? a->selected_quest_ip : NULL);
+    if (!ip) return 0;
+    for (int i = 0; i < a->quest_count; i++)
+        if (strcmp(a->quests[i].ip, ip) == 0) return a->quests[i].pad_slot;
+    return pad_blob_lookup(a->quest_pads, ip);
+}
+static int headset_uses_slot_unlocked(const bsdr_app *a, int slot) {
+    if (slot < 0) return 0;
+    for (int i = 0; i < a->quest_count; i++)
+        if (a->quests[i].pad_slot == slot) return 1;
+    return 0;
+}
+/* Close the slot unless a remaining writer still owns it. */
+static void pad_leave(bsdr_app *a, int slot) {
+    if (!a || slot < 0) return;
+    bsdr_mutex_lock(a->lock);
+    int keep = headset_uses_slot_unlocked(a, slot);
+    if (!keep && a->cloud_as_pad &&
+        bsdr_pad_route_cloud(1, live_headset_pad_unlocked(a)) == slot)
+        keep = 1;
+    bsdr_mutex_unlock(a->lock);
+    if (keep) bsdr_pad_release(slot);
+    else bsdr_pad_close(slot);
+}
+
+void bsdr_app_set_cloud_as_pad(bsdr_app *a, bool on) {
+    int old = on ? -1 : bsdr_app_cloud_pad(a);
+    bsdr_mutex_lock(a->lock);
+    a->cloud_as_pad = on;
+    bsdr_mutex_unlock(a->lock);
+    if (!on && old >= 0) pad_leave(a, old);
+    settings_save(a);
+}
+
+bool bsdr_app_get_cloud_as_pad(bsdr_app *a) {
+    if (!a) return false;
+    bsdr_mutex_lock(a->lock);
+    bool v = a->cloud_as_pad;
+    bsdr_mutex_unlock(a->lock);
+    return v;
+}
+
+int bsdr_app_cloud_pad(bsdr_app *a) {
+    if (!a) return -1;
+    bsdr_mutex_lock(a->lock);
+    int as = a->cloud_as_pad;
+    int hs = live_headset_pad_unlocked(a);
+    bsdr_mutex_unlock(a->lock);
+    return bsdr_pad_route_cloud(as, hs);
+}
+
+void bsdr_app_vacate_cloud_pad(bsdr_app *a) {
+    int s = bsdr_app_cloud_pad(a);
+    if (s >= 0) pad_leave(a, s);
+}
+
+/* Rewrite a->quest_pads from the live list + keep any saved IPs not currently seen. Caller holds lock. */
+static int pad_blob_lookup(const char *blob, const char *ip) {
+    if (!blob || !ip || !ip[0]) return 0;
+    size_t n = strlen(ip);
+    for (const char *p = blob; *p; ) {
+        if (strncmp(p, ip, n) == 0 && p[n] == '=') return atoi(p + n + 1);
+        const char *c = strchr(p, ',');
+        p = c ? c + 1 : p + strlen(p);
+    }
+    return 0;
+}
+static void pad_blob_upsert(char *blob, size_t cap, const char *ip, int slot) {
+    char out[512]; size_t o = 0;
+    size_t n = strlen(ip);
+    for (const char *p = blob; *p && o + 80 < sizeof out; ) {
+        const char *c = strchr(p, ',');
+        size_t len = c ? (size_t)(c - p) : strlen(p);
+        int drop = (len > n && p[n] == '=' && strncmp(p, ip, n) == 0);
+        if (!drop && len) {
+            if (o) out[o++] = ',';
+            memcpy(out + o, p, len); o += len;
+        }
+        p = c ? c + 1 : p + len;
+    }
+    if (o) out[o++] = ',';
+    o += (size_t)snprintf(out + o, sizeof out - o, "%s=%d", ip, slot);
+    snprintf(blob, cap, "%s", out);
+}
+
+void bsdr_app_set_quest_pad(bsdr_app *a, const char *ip, int slot) {
+    if (!a || !ip || !ip[0]) return;
+    if (slot < -1) slot = -1;
+    if (slot >= BSDR_MAX_PADS) slot = BSDR_MAX_PADS - 1;
+    int old = bsdr_app_headset_pad(a, ip);
+    int old_cloud = bsdr_app_cloud_pad(a);
+    bsdr_mutex_lock(a->lock);
+    for (int i = 0; i < a->quest_count; i++)
+        if (strcmp(a->quests[i].ip, ip) == 0) a->quests[i].pad_slot = slot;
+    pad_blob_upsert(a->quest_pads, sizeof a->quest_pads, ip, slot);
+    bsdr_mutex_unlock(a->lock);
+    if (old >= 0 && old != slot) pad_leave(a, old);
+    int new_cloud = bsdr_app_cloud_pad(a);
+    if (old_cloud >= 0 && old_cloud != new_cloud) pad_leave(a, old_cloud);
+    settings_save(a);
+}
+
+int bsdr_app_headset_pad(bsdr_app *a, const char *ip) {
+    int slot = 0;
+    if (!a) return 0;
+    bsdr_mutex_lock(a->lock);
+    if (ip && ip[0]) {
+        int found = 0;
+        for (int i = 0; i < a->quest_count; i++)
+            if (strcmp(a->quests[i].ip, ip) == 0) { slot = a->quests[i].pad_slot; found = 1; break; }
+        if (!found) slot = pad_blob_lookup(a->quest_pads, ip);
+    }
+    bsdr_mutex_unlock(a->lock);
+    return slot;
 }
 
 void bsdr_app_set_threed(bsdr_app *a, int mode, int deepness, int convergence, int swap, int full,
@@ -1157,6 +1282,8 @@ static void settings_save(bsdr_app *a) {
     if (!settings_path(path, sizeof(path))) return;
     bsdr_mutex_lock(a->lock);
     int cpu = a->cpu_only ? 1 : 0, bro = a->bitrate_override, ptouch = a->pointer_touch ? 1 : 0;
+    int cpad = a->cloud_as_pad ? 1 : 0;
+    char qpads[512]; snprintf(qpads, sizeof qpads, "%s", a->quest_pads);
     int encp = a->enc_level, lan1x = a->lan_1x ? 1 : 0, fcap = a->fps_cap, wopt = a->wifi_opt ? 1 : 0;
     int x264t = a->enc_x264_threads, vaapi = a->use_vaapi ? 1 : 0, kms = a->use_kmsgrab ? 1 : 0;
     int cpli = a->cloud_rtcp_pli ? 1 : 0;
@@ -1184,6 +1311,8 @@ static void settings_save(bsdr_app *a) {
     FILE *f = fopen(path, "w");
     if (!f) { BSDR_WARN("bsdr.app", "could not save settings to %s", path); return; }
     fprintf(f, "cloud_rtcp_pli=%d\n", cpli);
+    fprintf(f, "cloud_as_pad=%d\n", cpad);
+    if (qpads[0]) fprintf(f, "quest_pads=%s\n", qpads);
     fprintf(f, "cpu_only=%d\nbitrate_override=%d\npointer_touch=%d\n"
                "sniff_method=%d\nsniff_relay_port=%d\nsniff_want=%d\nbot_mode=%s\nbot_follow=%d\n"
                "bot_loopback=%d\nbot_solo_owner=%d\nenc_level=%d\nlan_1x=%d\nfps_cap=%d\nwifi_opt=%d\n"
@@ -1242,6 +1371,12 @@ void bsdr_app_load_settings(bsdr_app *a) {
         if      (sscanf(line, "cpu_only=%d", &v) == 1)         a->cpu_only = v ? true : false;
         else if (sscanf(line, "bitrate_override=%d", &v) == 1) a->bitrate_override = v > 0 ? v : 0;
         else if (sscanf(line, "pointer_touch=%d", &v) == 1)    a->pointer_touch = v ? true : false;
+        else if (sscanf(line, "cloud_as_pad=%d", &v) == 1)     a->cloud_as_pad = v ? true : false;
+        else if (strncmp(line, "quest_pads=", 11) == 0) {
+            snprintf(a->quest_pads, sizeof a->quest_pads, "%.511s", line + 11);
+            for (int i = 0; i < a->quest_count; i++)
+                a->quests[i].pad_slot = pad_blob_lookup(a->quest_pads, a->quests[i].ip);
+        }
         else if (sscanf(line, "sniff_method=%d", &v) == 1)     a->sniff_method = (v >= 0 && v <= 2) ? v : 0;
         else if (sscanf(line, "sniff_relay_port=%d", &v) == 1) a->sniff_remote_port = (v > 0 && v < 65536) ? v : 0;
         else if (sscanf(line, "sniff_want=%d", &v) == 1)       a->sniff_want = v ? true : false;
@@ -2572,7 +2707,7 @@ size_t bsdr_app_status_json(bsdr_app *a, char *out, size_t cap) {
         "\"quest\":{\"paired\":%s,\"name\":\"%s\",\"ip\":\"%s\",\"streaming\":%s,\"paused\":%s},"
         "\"source\":{\"mode\":\"%s\",\"path\":\"%s\",\"path2\":\"%s\",\"audio\":%s,\"fileLoop\":%s,"
         "\"termBackend\":\"%s\",\"termCols\":%d,\"termRows\":%d},"
-        "\"blank\":%s,\"pointerTouch\":%s,\"cloudMic\":%s,\"ownerMicLocal\":%s,\"ownerMicToQuestMic\":%s,\"roomMic\":%s,\"tlsInsecure\":%s,"
+        "\"blank\":%s,\"pointerTouch\":%s,\"cloudAsPad\":%s,\"cloudMic\":%s,\"ownerMicLocal\":%s,\"ownerMicToQuestMic\":%s,\"roomMic\":%s,\"tlsInsecure\":%s,"
         "\"threed\":{\"mode\":%d,\"deepness\":%d,\"convergence\":%d,\"swap\":%s,\"full\":%s,\"tier\":%d,\"ai\":\"%s\"},"
         "\"quality\":{\"w\":%d,\"h\":%d,\"bitrate\":%d,\"brOverride\":%d,\"gpuEncode\":%s,\"encLevel\":%d,\"x264Threads\":%d,\"vaapi\":%s,\"kmsgrab\":%s,\"lan1x\":%s,\"fpsCap\":%d,\"wifiOpt\":%s,\"cloudPli\":%s},"
         "\"voice\":{\"stt\":\"%s\",\"sttModel\":\"%s\",\"sttToken\":%s,"
@@ -2594,7 +2729,8 @@ size_t bsdr_app_status_json(bsdr_app *a, char *out, size_t cap) {
         a->streaming ? "true" : "false", a->paused ? "true" : "false",
         a->source, a->source_path, a->source_path2, a->audio ? "true" : "false", a->file_loop ? "true" : "false",
         a->term_backend[0] ? a->term_backend : "pty", a->term_cols, a->term_rows,
-        a->blank_want ? "true" : "false", a->pointer_touch ? "true" : "false", a->cloud_mic_fallback ? "true" : "false",
+        a->blank_want ? "true" : "false", a->pointer_touch ? "true" : "false",
+        a->cloud_as_pad ? "true" : "false", a->cloud_mic_fallback ? "true" : "false",
         a->owner_mic_local ? "true" : "false", a->owner_mic_to_questmic ? "true" : "false", a->room_mic_want ? "true" : "false",
         bsdr_tls_is_insecure() ? "true" : "false",
         a->threed_mode, a->threed_deepness, a->threed_convergence,
@@ -2623,9 +2759,9 @@ size_t bsdr_app_status_json(bsdr_app *a, char *out, size_t cap) {
         a->selected_quest_ip);
     uint64_t now = bsdr_now_ms();
     for (int i = 0; i < a->quest_count && n < (int)cap - 128; i++) {
-        n += snprintf(out + n, cap - n, "%s{\"ip\":\"%s\",\"name\":\"%s\",\"ageMs\":%llu}",
+        n += snprintf(out + n, cap - n, "%s{\"ip\":\"%s\",\"name\":\"%s\",\"ageMs\":%llu,\"pad\":%d}",
                       i ? "," : "", a->quests[i].ip, a->quests[i].name,
-                      (unsigned long long)(now - a->quests[i].last_seen_ms));
+                      (unsigned long long)(now - a->quests[i].last_seen_ms), a->quests[i].pad_slot);
     }
     n += snprintf(out + n, cap - n, "],");
     /* depth-model manager: cache dir, per-tier cached state + size, and any in-flight download */

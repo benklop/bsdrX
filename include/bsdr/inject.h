@@ -32,6 +32,12 @@ bsdr_injector *bsdr_injector_create(int screen_w, int screen_h);
 void bsdr_injector_handle(bsdr_injector *inj, const bsdr_input_event *ev);
 void bsdr_injector_destroy(bsdr_injector *inj);
 
+/* Process-global virtual gamepads (player 1..4). Created on first emit so unused
+ * slots don't show up as extra controllers. Safe to call from any input thread. */
+void bsdr_pad_emit(int slot, const bsdr_gamepad *g);
+void bsdr_pad_release(int slot); /* zero buttons/axes; keep the device */
+void bsdr_pad_close(int slot);   /* release and destroy that slot's device */
+
 /* Pointer mode (process-global; the injector is per-session so this is the live toggle the web UI
  * flips): 0 = mouse (absolute move + click; a tap is a click, hold+move is a drag), 1 = TOUCH — map
  * the headset's pointer to real touchscreen events (tap/drag) where the OS supports injecting them

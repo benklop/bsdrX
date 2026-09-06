@@ -193,6 +193,10 @@ static const char PAGE[] =
 "Blank my physical screen while the headset is connected (privacy)</label></div>"
 "<div class=row><label style=width:auto><input id=ptouch type=checkbox style=width:auto onchange=pointerModeToggle()> "
 "Use the headset pointer as a <b>touchpad</b> (real tap/drag touch events) instead of a mouse</label></div>"
+"<div class=row><label style=width:auto><input id=cloudpad type=checkbox style=width:auto onchange=cloudPadToggle()> "
+"Present <b>Big Picture</b> (shared internet-room input) as a second gamepad</label></div>"
+"<div class=hint>Only the connected headset's pad is live. Extra assignments apply when that "
+"headset is selected. Big Picture is a simultaneous second pad (it skips the headset's slot).</div>"
 "<div class=pslot data-slot=account></div></div>"
 
 /* Second (bot) account — its own login + room-join. Joining your room as a 2nd participant makes the
@@ -694,6 +698,8 @@ static const char PAGE[] =
 "function floopSet(){api('/api/fileloop',{on:floop.checked?1:0})}"
 "function blankToggle(){api('/api/blank',{on:blank.checked?1:0})}"
 "function pointerModeToggle(){api('/api/pointermode',{touch:ptouch.checked?1:0})}"
+"function cloudPadToggle(){api('/api/cloudpad',{on:cloudpad.checked?1:0})}"
+"function questPad(ip,sel){api('/api/questpad',{ip:ip,slot:+sel.value})}"
 "function bitrateSet(){api('/api/bitrate',{mbps:+brate.value||0})}"
 "function encoderSet(){api('/api/encoder',{gpu:+enc.value})}"
 "function vaapiSet(){api('/api/vaapi',{on:vaapi.checked?1:0})}"
@@ -835,8 +841,13 @@ static const char PAGE[] =
 "relayrow.style.display=(sn.method===2)?'flex':'none';"
 "if(document.activeElement!==relayport&&sn.relayPort!==undefined)relayport.value=sn.relayPort||'';"
 "if(document.activeElement!==vsub&&sn.substitute!==undefined)vsub.checked=sn.substitute;}"
-"let h='';for(const q of s.quests){let on=s.selected===q.ip;h+=\"<div class=q><span class=nm>\"+(on?'\\u2713 ':'')+q.name+' <span style=color:var(--muted)>'+q.ip+\"</span></span><button onclick=\\\"sel('\"+q.ip+\"')\\\">\"+(on?'Selected':'Use')+'</button></div>'}"
-"if(s.quests.length>1||s.selected)h='<div class=hint style=margin-top:8px>Choose a headset:</div>'+h;quests.innerHTML=h;"
+"let h='';for(const q of s.quests){let on=s.selected===q.ip;let ps=(q.pad===undefined||q.pad===null)?0:q.pad;"
+"let opts='<option value=-1'+(ps<0?' selected':'')+'>Off</option>';"
+"for(let i=0;i<4;i++)opts+='<option value='+i+(ps===i?' selected':'')+'>P'+(i+1)+'</option>';"
+"h+=\"<div class=q><span class=nm>\"+(on?'\\u2713 ':'')+q.name+' <span style=color:var(--muted)>'+q.ip+\"</span></span>\""
+"+\"<label class=hint>Pad <select onchange=\\\"questPad('\"+q.ip+\"',this)\\\">\"+opts+'</select></label>'"
+"+\"<button onclick=\\\"sel('\"+q.ip+\"')\\\">\"+(on?'Selected':'Use')+'</button></div>'}"
+"if(s.quests.length>1||s.selected)h='<div class=hint style=margin-top:8px>Choose a headset and which gamepad it presents:</div>'+h;quests.innerHTML=h;"
 "for(const r of document.getElementsByName('src'))r.checked=(r.value===s.source.mode);"
 "if(document.activeElement!==path)path.value=(s.source.mode==='file'?(s.source.path||''):path.value);"
 "if(document.getElementById('floop')&&document.activeElement!==floop&&s.source.fileLoop!==undefined)floop.checked=!!s.source.fileLoop;"
@@ -847,6 +858,7 @@ static const char PAGE[] =
 "if((m==='webcam'||m==='webcam3d')&&!camsel.firstChild){window._cam=s.source.path;window._camR=s.source.path2;loadCams();}}"
 "if(document.activeElement!==blank)blank.checked=!!s.blank;"
 "if(document.activeElement!==ptouch)ptouch.checked=!!s.pointerTouch;"
+"if(document.getElementById('cloudpad')&&document.activeElement!==cloudpad)cloudpad.checked=!!s.cloudAsPad;"
 "if(s.quality){if(document.activeElement!==brate)brate.value=s.quality.brOverride?(s.quality.brOverride/1e6):'';"
 "breff.textContent='(now '+((s.quality.bitrate||0)/1e6).toFixed(1)+' Mbps'+(s.quality.brOverride?', overriding':', from headset')+')';"
 "if(document.activeElement!==enc)enc.value=s.quality.gpuEncode?'1':'0';"
@@ -1064,6 +1076,16 @@ static void handle(struct bsdr_webui *w, bsdr_socket_t c, const char *method,
     } else if (strcmp(method, "POST") == 0 && strcmp(path, "/api/pointermode") == 0) {
         double touch = 0; bsdr_json_get_double(body, "touch", &touch);
         bsdr_app_set_pointer_touch(a, touch != 0);   /* mouse vs real touch (live, persisted) */
+        respond(c, 200, "application/json", "{\"ok\":true}", 11);
+    } else if (strcmp(method, "POST") == 0 && strcmp(path, "/api/cloudpad") == 0) {
+        double on = 0; bsdr_json_get_double(body, "on", &on);
+        bsdr_app_set_cloud_as_pad(a, on != 0);   /* Big Picture / internet input → player 2 */
+        respond(c, 200, "application/json", "{\"ok\":true}", 11);
+    } else if (strcmp(method, "POST") == 0 && strcmp(path, "/api/questpad") == 0) {
+        char ip[64] = ""; double slot = 0;
+        bsdr_json_get_str(body, "ip", ip, sizeof ip);
+        bsdr_json_get_double(body, "slot", &slot);
+        bsdr_app_set_quest_pad(a, ip, (int)slot);
         respond(c, 200, "application/json", "{\"ok\":true}", 11);
     } else if (strcmp(method, "POST") == 0 && strcmp(path, "/api/cloudmic") == 0) {
         double on = 0; bsdr_json_get_double(body, "on", &on);

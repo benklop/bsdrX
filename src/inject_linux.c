@@ -15,12 +15,14 @@
  * this program. If not, see <https://www.gnu.org/licenses/>.
  */
 /* Linux input injection via uinput — the Linux analog of SendInput + ViGEmBus.
- * Creates virtual mouse / absolute-pointer / keyboard / gamepad devices. Falls
- * back to a logging stub if /dev/uinput is unavailable. */
+ * Creates virtual mouse / absolute-pointer / keyboard devices, plus up to
+ * BSDR_MAX_PADS gamepads on demand (shared across injectors). Falls back to a
+ * logging stub if /dev/uinput is unavailable. */
 #include "bsdr/inject.h"
 #include "bsdr/log.h"
 
 #include <fcntl.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -32,7 +34,7 @@
 #include <linux/uinput.h>
 
 struct bsdr_injector {
-    int mouse, absdev, kbd, pad;
+    int mouse, absdev, kbd;
     int touch;                     /* multitouch (ABS_MT) device for touch pointer mode */
     int touch_x, touch_y;          /* last pointer position (device units), for a touch-down at point */
     bool touching;                 /* a finger is currently down (touch mode) */
@@ -130,7 +132,7 @@ static int make_device(const char *name,
                        const int *keys, int n_keys,
                        const int *rels, int n_rels,
                        const struct uinput_abs_setup *abs, int n_abs,
-                       int prop) {
+                       int prop, int product) {
     int fd = open("/dev/uinput", O_WRONLY | O_NONBLOCK);
     if (fd < 0) return -1;
     for (int i = 0; i < n_ev; i++) ioctl(fd, UI_SET_EVBIT, ev_bits[i]);
@@ -147,7 +149,7 @@ static int make_device(const char *name,
     memset(&us, 0, sizeof(us));
     us.id.bustype = BUS_USB;
     us.id.vendor = 0x1234;
-    us.id.product = 0x5678;
+    us.id.product = (unsigned short)(product > 0 ? product : 0x5678);
     snprintf(us.name, sizeof(us.name), "%s", name);
     if (ioctl(fd, UI_DEV_SETUP, &us) < 0 || ioctl(fd, UI_DEV_CREATE) < 0) {
         close(fd);
@@ -261,15 +263,29 @@ static int mouse_btn_code(bsdr_mouse_button b) {
  * latched and even wedge the real (I2C-HID) touchpad. We mirror the live fds into
  * file-scope slots and, on a fatal signal, release every button/key and
  * orderly-destroy the devices using only async-signal-safe calls. */
-static volatile sig_atomic_t g_clean_mouse = -1, g_clean_abs = -1,
-                             g_clean_kbd = -1, g_clean_pad = -1;
+static volatile sig_atomic_t g_clean_mouse = -1, g_clean_abs = -1, g_clean_kbd = -1;
+static volatile sig_atomic_t g_clean_pads[BSDR_MAX_PADS] = { -1, -1, -1, -1 };
 static volatile sig_atomic_t g_crash_handlers = 0;
+_Static_assert(BSDR_MAX_PADS == 4, "g_pads[] initializer lists 4 slots");
+static int g_pads[BSDR_MAX_PADS] = { -1, -1, -1, -1 };
+static pthread_mutex_t g_pad_mu = PTHREAD_MUTEX_INITIALIZER;
 
-static void release_pressed(int fd_mouse, int fd_abs, int fd_kbd, int fd_pad) {
-    static const int mbtn[] = { BTN_LEFT, BTN_RIGHT, BTN_MIDDLE, BTN_SIDE, BTN_EXTRA };
-    static const int abtn[] = { BTN_LEFT, BTN_RIGHT, BTN_MIDDLE };
+static void release_pad_fd(int fd) {
     static const int pbtn[] = { BTN_A, BTN_B, BTN_X, BTN_Y, BTN_TL, BTN_TR,
                                 BTN_SELECT, BTN_START, BTN_MODE, BTN_THUMBL, BTN_THUMBR };
+    if (fd < 0) return;
+    for (size_t i = 0; i < sizeof(pbtn)/sizeof(pbtn[0]); i++) emit(fd, EV_KEY, pbtn[i], 0);
+    emit(fd, EV_ABS, ABS_X, 0); emit(fd, EV_ABS, ABS_Y, 0);
+    emit(fd, EV_ABS, ABS_RX, 0); emit(fd, EV_ABS, ABS_RY, 0);
+    emit(fd, EV_ABS, ABS_Z, 0); emit(fd, EV_ABS, ABS_RZ, 0);
+    emit(fd, EV_ABS, ABS_HAT0X, 0);
+    emit(fd, EV_ABS, ABS_HAT0Y, 0);
+    syn(fd);
+}
+
+static void release_pressed(int fd_mouse, int fd_abs, int fd_kbd) {
+    static const int mbtn[] = { BTN_LEFT, BTN_RIGHT, BTN_MIDDLE, BTN_SIDE, BTN_EXTRA };
+    static const int abtn[] = { BTN_LEFT, BTN_RIGHT, BTN_MIDDLE };
     if (fd_mouse >= 0) {
         for (size_t i = 0; i < sizeof(mbtn)/sizeof(mbtn[0]); i++) emit(fd_mouse, EV_KEY, mbtn[i], 0);
         syn(fd_mouse);
@@ -282,26 +298,33 @@ static void release_pressed(int fd_mouse, int fd_abs, int fd_kbd, int fd_pad) {
         for (int k = KEY_ESC; k <= KEY_MICMUTE; k++) emit(fd_kbd, EV_KEY, k, 0);
         syn(fd_kbd);
     }
-    if (fd_pad >= 0) {
-        for (size_t i = 0; i < sizeof(pbtn)/sizeof(pbtn[0]); i++) emit(fd_pad, EV_KEY, pbtn[i], 0);
-        syn(fd_pad);
-    }
 }
 
-static void destroy_fds(int fd_mouse, int fd_abs, int fd_kbd, int fd_pad) {
-    int fds[] = { fd_mouse, fd_abs, fd_kbd, fd_pad };
-    for (int i = 0; i < 4; i++)
+static void destroy_fds(int fd_mouse, int fd_abs, int fd_kbd) {
+    int fds[] = { fd_mouse, fd_abs, fd_kbd };
+    for (int i = 0; i < 3; i++)
         if (fds[i] >= 0) { ioctl(fds[i], UI_DEV_DESTROY); close(fds[i]); }
+}
+
+static void destroy_pads(void) {
+    for (int i = 0; i < BSDR_MAX_PADS; i++) {
+        int p = g_clean_pads[i];
+        g_clean_pads[i] = -1;
+        g_pads[i] = -1;
+        if (p >= 0) { ioctl(p, UI_DEV_DESTROY); close(p); }
+    }
 }
 
 static void crash_cleanup(int sig) {
     static const char msg[] =
         "bsdr.inject: fatal signal, releasing virtual input devices\n";
     ssize_t w = write(STDERR_FILENO, msg, sizeof(msg) - 1); (void)w;
-    int m = g_clean_mouse, a = g_clean_abs, k = g_clean_kbd, p = g_clean_pad;
-    g_clean_mouse = g_clean_abs = g_clean_kbd = g_clean_pad = -1;
-    release_pressed(m, a, k, p);
-    destroy_fds(m, a, k, p);
+    int m = g_clean_mouse, a = g_clean_abs, k = g_clean_kbd;
+    g_clean_mouse = g_clean_abs = g_clean_kbd = -1;
+    release_pressed(m, a, k);
+    destroy_fds(m, a, k);
+    for (int i = 0; i < BSDR_MAX_PADS; i++) release_pad_fd(g_clean_pads[i]);
+    destroy_pads();
     signal(sig, SIG_DFL);   /* restore default and re-raise so we still core/exit */
     raise(sig);
 }
@@ -321,7 +344,7 @@ static void install_crash_handlers(void) {
 bsdr_injector *bsdr_injector_create(int screen_w, int screen_h) {
     struct bsdr_injector *inj = calloc(1, sizeof(*inj));
     if (!inj) return NULL;
-    inj->mouse = inj->absdev = inj->kbd = inj->pad = -1;
+    inj->mouse = inj->absdev = inj->kbd = -1;
     inj->screen_w = screen_w > 0 ? screen_w : 1920;
     inj->screen_h = screen_h > 0 ? screen_h : 1080;
 
@@ -341,7 +364,7 @@ bsdr_injector *bsdr_injector_create(int screen_w, int screen_h) {
     absy.absinfo.minimum = 0; absy.absinfo.maximum = inj->screen_h;
     struct uinput_abs_setup absxy[] = { absx, absy };
     inj->mouse = make_device("bsdr-virtual-pointer", ev_ptr, 3, pkeys_m, 5,
-                             prels, 2, absxy, 2, INPUT_PROP_POINTER);
+                             prels, 2, absxy, 2, INPUT_PROP_POINTER, 0x5678);
     inj->absdev = -1;           /* folded into the unified pointer (inj->mouse) */
 
     /* Touch pointer mode: a type-B multitouch touchscreen so the headset's tap/drag arrive as REAL
@@ -357,38 +380,25 @@ bsdr_injector *bsdr_injector_create(int screen_w, int screen_h) {
     tabs[3].code = ABS_MT_POSITION_Y;  tabs[3].absinfo.maximum = inj->screen_h;
     tabs[4].code = ABS_X;              tabs[4].absinfo.maximum = inj->screen_w;
     tabs[5].code = ABS_Y;              tabs[5].absinfo.maximum = inj->screen_h;
-    inj->touch = make_device("bsdr-virtual-touch", ev_tch, 2, tkeys, 1, NULL, 0, tabs, 6, INPUT_PROP_DIRECT);
+    inj->touch = make_device("bsdr-virtual-touch", ev_tch, 2, tkeys, 1, NULL, 0, tabs, 6, INPUT_PROP_DIRECT, 0x5679);
 
     int ev_kbd[] = { EV_KEY };
     int kkeys[KEY_MAX];
     int nk = 0;
     for (int k = KEY_ESC; k <= KEY_MICMUTE && nk < KEY_MAX; k++) kkeys[nk++] = k;
-    inj->kbd = make_device("bsdr-virtual-keyboard", ev_kbd, 1, kkeys, nk, NULL, 0, NULL, 0, -1);
-
-    int ev_pad[] = { EV_KEY, EV_ABS };
-    int pkeys[] = { BTN_A, BTN_B, BTN_X, BTN_Y, BTN_TL, BTN_TR, BTN_SELECT,
-                    BTN_START, BTN_MODE, BTN_THUMBL, BTN_THUMBR };
-    struct uinput_abs_setup pabs[6];
-    memset(pabs, 0, sizeof(pabs));
-    int pcodes[] = { ABS_X, ABS_Y, ABS_RX, ABS_RY, ABS_Z, ABS_RZ };
-    for (int i = 0; i < 6; i++) {
-        pabs[i].code = pcodes[i];
-        if (i < 4) { pabs[i].absinfo.minimum = -32768; pabs[i].absinfo.maximum = 32767; }
-        else { pabs[i].absinfo.minimum = 0; pabs[i].absinfo.maximum = 255; }
-    }
-    inj->pad = make_device("bsdr-virtual-gamepad", ev_pad, 2, pkeys, 11, NULL, 0, pabs, 6, -1);
+    inj->kbd = make_device("bsdr-virtual-keyboard", ev_kbd, 1, kkeys, nk, NULL, 0, NULL, 0, -1, 0x567A);
 
     inj->ok = (inj->mouse >= 0 && inj->kbd >= 0);
     if (!inj->ok)
         BSDR_WARN("bsdr.inject", "/dev/uinput unavailable; logging only "
                   "(see README for the udev rule)");
     else
-        BSDR_INFO("bsdr.inject", "uinput devices created (mouse/abs/keyboard/gamepad)");
+        BSDR_INFO("bsdr.inject", "uinput devices created (mouse/abs/keyboard; pads on demand)");
 
     /* arm crash-safe cleanup for whatever opened */
     g_clean_mouse = inj->mouse; g_clean_abs = inj->absdev;
-    g_clean_kbd   = inj->kbd;   g_clean_pad = inj->pad;
-    if (inj->mouse >= 0 || inj->absdev >= 0 || inj->kbd >= 0 || inj->pad >= 0)
+    g_clean_kbd   = inj->kbd;
+    if (inj->mouse >= 0 || inj->absdev >= 0 || inj->kbd >= 0)
         install_crash_handlers();
     return inj;
 }
@@ -489,24 +499,90 @@ static void emit_key(struct bsdr_injector *inj, const bsdr_input_event *ev) {
     if (!ev->u.key.down) release_all_latched(inj);
 }
 
-static void emit_gamepad(struct bsdr_injector *inj, const bsdr_gamepad *g) {
-    int fd = inj->pad;
-    emit(fd, EV_ABS, ABS_X, g->lx);
-    emit(fd, EV_ABS, ABS_Y, g->ly);
-    emit(fd, EV_ABS, ABS_RX, g->rx);
-    emit(fd, EV_ABS, ABS_RY, g->ry);
-    emit(fd, EV_ABS, ABS_Z, g->lt);
-    emit(fd, EV_ABS, ABS_RZ, g->rt);
-    struct { uint16_t bit; int code; } map[] = {
-        { BSDR_XINPUT_A, BTN_A }, { BSDR_XINPUT_B, BTN_B },
-        { BSDR_XINPUT_X, BTN_X }, { BSDR_XINPUT_Y, BTN_Y },
-        { BSDR_XINPUT_LEFT_SHOULDER, BTN_TL }, { BSDR_XINPUT_RIGHT_SHOULDER, BTN_TR },
-        { BSDR_XINPUT_BACK, BTN_SELECT }, { BSDR_XINPUT_START, BTN_START },
-        { BSDR_XINPUT_LEFT_THUMB, BTN_THUMBL }, { BSDR_XINPUT_RIGHT_THUMB, BTN_THUMBR },
-    };
-    for (size_t i = 0; i < sizeof(map) / sizeof(map[0]); i++)
-        emit(fd, EV_KEY, map[i].code, (g->buttons & map[i].bit) ? 1 : 0);
-    syn(fd);
+static int make_pad_device(int slot) {
+    int ev_pad[] = { EV_KEY, EV_ABS };
+    int pkeys[] = { BTN_A, BTN_B, BTN_X, BTN_Y, BTN_TL, BTN_TR, BTN_SELECT,
+                    BTN_START, BTN_MODE, BTN_THUMBL, BTN_THUMBR };
+    struct uinput_abs_setup pabs[8];
+    memset(pabs, 0, sizeof(pabs));
+    int pcodes[] = { ABS_X, ABS_Y, ABS_RX, ABS_RY, ABS_Z, ABS_RZ, ABS_HAT0X, ABS_HAT0Y };
+    for (int i = 0; i < 8; i++) {
+        pabs[i].code = pcodes[i];
+        if (i < 4) { pabs[i].absinfo.minimum = -32768; pabs[i].absinfo.maximum = 32767; }
+        else if (i < 6) { pabs[i].absinfo.minimum = 0; pabs[i].absinfo.maximum = 255; }
+        else { pabs[i].absinfo.minimum = -1; pabs[i].absinfo.maximum = 1; }
+    }
+    char name[32];
+    if (slot <= 0) snprintf(name, sizeof name, "bsdr-virtual-gamepad");
+    else snprintf(name, sizeof name, "bsdr-virtual-gamepad-%d", slot + 1);
+    return make_device(name, ev_pad, 2, pkeys, 11, NULL, 0, pabs, 8, -1, 0x5680 + slot);
+}
+
+/* Caller holds g_pad_mu. */
+static int pad_ensure_locked(int slot) {
+    if (slot < 0 || slot >= BSDR_MAX_PADS) return -1;
+    if (g_pads[slot] < 0) {
+        g_pads[slot] = make_pad_device(slot);
+        g_clean_pads[slot] = g_pads[slot];
+        if (g_pads[slot] >= 0) {
+            install_crash_handlers();
+            BSDR_INFO("bsdr.inject", "uinput gamepad player %d created", slot + 1);
+        } else
+            BSDR_WARN("bsdr.inject", "uinput gamepad player %d failed (see README udev rule)", slot + 1);
+    }
+    return g_pads[slot];
+}
+
+void bsdr_pad_emit(int slot, const bsdr_gamepad *g) {
+    if (!g) return;
+    pthread_mutex_lock(&g_pad_mu);
+    int fd = pad_ensure_locked(slot);
+    if (fd >= 0) {
+        emit(fd, EV_ABS, ABS_X, g->lx);
+        emit(fd, EV_ABS, ABS_Y, g->ly);
+        emit(fd, EV_ABS, ABS_RX, g->rx);
+        emit(fd, EV_ABS, ABS_RY, g->ry);
+        emit(fd, EV_ABS, ABS_Z, g->lt);
+        emit(fd, EV_ABS, ABS_RZ, g->rt);
+        /* xpad-style XInput: D-pad is a hat only, not BTN_DPAD_* */
+        int hx = (g->buttons & BSDR_XINPUT_DPAD_LEFT) ? -1 : (g->buttons & BSDR_XINPUT_DPAD_RIGHT) ? 1 : 0;
+        int hy = (g->buttons & BSDR_XINPUT_DPAD_UP) ? -1 : (g->buttons & BSDR_XINPUT_DPAD_DOWN) ? 1 : 0;
+        emit(fd, EV_ABS, ABS_HAT0X, hx);
+        emit(fd, EV_ABS, ABS_HAT0Y, hy);
+        struct { uint16_t bit; int code; } map[] = {
+            { BSDR_XINPUT_A, BTN_A }, { BSDR_XINPUT_B, BTN_B },
+            { BSDR_XINPUT_X, BTN_X }, { BSDR_XINPUT_Y, BTN_Y },
+            { BSDR_XINPUT_LEFT_SHOULDER, BTN_TL }, { BSDR_XINPUT_RIGHT_SHOULDER, BTN_TR },
+            { BSDR_XINPUT_BACK, BTN_SELECT }, { BSDR_XINPUT_START, BTN_START },
+            { BSDR_XINPUT_LEFT_THUMB, BTN_THUMBL }, { BSDR_XINPUT_RIGHT_THUMB, BTN_THUMBR },
+        };
+        for (size_t i = 0; i < sizeof(map) / sizeof(map[0]); i++)
+            emit(fd, EV_KEY, map[i].code, (g->buttons & map[i].bit) ? 1 : 0);
+        syn(fd);
+    }
+    pthread_mutex_unlock(&g_pad_mu);
+}
+
+void bsdr_pad_release(int slot) {
+    if (slot < 0 || slot >= BSDR_MAX_PADS) return;
+    pthread_mutex_lock(&g_pad_mu);
+    if (g_pads[slot] >= 0) release_pad_fd(g_pads[slot]);
+    pthread_mutex_unlock(&g_pad_mu);
+}
+
+void bsdr_pad_close(int slot) {
+    if (slot < 0 || slot >= BSDR_MAX_PADS) return;
+    pthread_mutex_lock(&g_pad_mu);
+    int fd = g_pads[slot];
+    g_pads[slot] = -1;
+    g_clean_pads[slot] = -1;
+    if (fd >= 0) {
+        release_pad_fd(fd);
+        ioctl(fd, UI_DEV_DESTROY);
+        close(fd);
+        BSDR_INFO("bsdr.inject", "uinput gamepad player %d removed", slot + 1);
+    }
+    pthread_mutex_unlock(&g_pad_mu);
 }
 
 /* Type-B single-finger touch at inj->touch_x/y. phase: 0 = down, 1 = move, 2 = up. */
@@ -570,7 +646,7 @@ void bsdr_injector_handle(bsdr_injector *inj, const bsdr_input_event *ev) {
             syn(inj->mouse);
             break;
         case BSDR_EV_KEY:    emit_key(inj, ev); break;
-        case BSDR_EV_GAMEPAD: emit_gamepad(inj, &ev->u.gamepad); break;
+        case BSDR_EV_GAMEPAD: bsdr_pad_emit((int)ev->u.gamepad.slot, &ev->u.gamepad); break;
     }
 }
 
@@ -578,9 +654,9 @@ void bsdr_injector_destroy(bsdr_injector *inj) {
     if (!inj) return;
     /* disarm crash cleanup first so a fatal signal mid-teardown won't touch the
      * fds we're about to close */
-    g_clean_mouse = g_clean_abs = g_clean_kbd = g_clean_pad = -1;
-    release_pressed(inj->mouse, inj->absdev, inj->kbd, inj->pad);  /* no latched buttons */
-    destroy_fds(inj->mouse, inj->absdev, inj->kbd, inj->pad);
+    g_clean_mouse = g_clean_abs = g_clean_kbd = -1;
+    release_pressed(inj->mouse, inj->absdev, inj->kbd);  /* no latched buttons */
+    destroy_fds(inj->mouse, inj->absdev, inj->kbd);
     if (inj->touch >= 0) { ioctl(inj->touch, UI_DEV_DESTROY); close(inj->touch); }
     free(inj);
 }

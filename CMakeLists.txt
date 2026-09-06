@@ -194,6 +194,10 @@ if(BSDR_BUILD_TESTS)
   target_link_libraries(test_input_decode PRIVATE bsdr_core)
   add_test(NAME input_decode COMMAND test_input_decode)
 
+  add_executable(test_pads tests/test_pads.c)
+  target_link_libraries(test_pads PRIVATE bsdr_core)
+  add_test(NAME pads COMMAND test_pads)
+
   add_executable(test_protocol tests/test_protocol.c)
   target_link_libraries(test_protocol PRIVATE bsdr_core)
   add_test(NAME protocol COMMAND test_protocol)

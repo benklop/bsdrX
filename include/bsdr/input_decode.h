@@ -28,8 +28,8 @@
 #include <stdint.h>
 
 /* Decode one message into `out` (capacity `max`). Returns the number of events
- * produced (0 on a short/unknown frame, otherwise 1). Key events are neutral
- * (value + is_vk); the platform injector maps to native keycodes incl. Shift. */
+ * produced (0 on a short/unknown frame, 1 for a known type). Key events are
+ * neutral (value + is_vk); the platform injector maps to native keycodes. */
 size_t bsdr_decode_binary(const uint8_t *data, size_t len,
                           bsdr_input_event *out, size_t max);
 

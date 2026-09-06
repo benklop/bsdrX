@@ -33,6 +33,7 @@ typedef struct {
     char ip[64];
     char name[64];
     uint64_t last_seen_ms;
+    int pad_slot;                 /* -1 = no gamepad, 0..3 = player 1..4 (default 0) */
 } bsdr_quest_entry;
 
 typedef struct bsdr_app {
@@ -189,6 +190,8 @@ typedef struct bsdr_app {
     double file_seek_frac;        /* seek target 0..1 (written before bumping file_seek_gen) */
     bool blank_want;              /* privacy: blank the physical monitor while the Quest is connected */
     bool pointer_touch;           /* input pointer mode: 0 = mouse (tap/drag as clicks), 1 = real touch */
+    bool cloud_as_pad;            /* present Big Picture / internet input as player 2 */
+    char quest_pads[512];         /* persisted "ip=slot,ip=slot" (slot -1..3) */
     /* 2D->3D side-by-side: applied on the encode path (forces CPU scale). Read by the LAN streamer
      * when it (re)opens the capture; a change takes effect on the next capture reopen. */
     int threed_mode;              /* bsdr_threed_mode: 0 off / 1 fast / 2 ai */
@@ -335,6 +338,12 @@ void bsdr_app_set_paired(bsdr_app *a, bool paired, const char *name, const char 
 void bsdr_app_set_streaming(bsdr_app *a, bool streaming);
 void bsdr_app_set_blank(bsdr_app *a, bool on);   /* privacy screen-blank toggle */
 void bsdr_app_set_pointer_touch(bsdr_app *a, bool on);   /* input pointer mode: mouse vs real touch */
+void bsdr_app_set_cloud_as_pad(bsdr_app *a, bool on);    /* Big Picture / internet users → extra pad */
+bool bsdr_app_get_cloud_as_pad(bsdr_app *a);
+int  bsdr_app_cloud_pad(bsdr_app *a);                    /* live Big Picture slot, or -1 */
+void bsdr_app_vacate_cloud_pad(bsdr_app *a);             /* close/release that slot (stream end) */
+void bsdr_app_set_quest_pad(bsdr_app *a, const char *ip, int slot); /* -1 off, 0..3 player */
+int  bsdr_app_headset_pad(bsdr_app *a, const char *ip);  /* assigned slot, default 0 */
 /* 2D->3D config (clamped; takes effect on the next capture reopen). ai_cmd may be NULL to keep. */
 void bsdr_app_set_threed(bsdr_app *a, int mode, int deepness, int convergence, int swap, int full,
                          int tier, const char *ai_cmd);

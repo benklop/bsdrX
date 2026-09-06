@@ -47,10 +47,13 @@ typedef enum {
     BSDR_BTN_X2
 } bsdr_mouse_button;
 
+#define BSDR_MAX_PADS 4   /* XInput player 1..4 */
+
 typedef struct {
     uint16_t buttons;   /* XInput wButtons bitmask */
     int16_t lx, ly, rx, ry;  /* sticks, -32768..32767 */
     uint8_t lt, rt;     /* triggers, 0..255 */
+    uint8_t slot;       /* 0..BSDR_MAX_PADS-1 — which virtual pad to drive */
 } bsdr_gamepad;
 
 typedef struct {
@@ -80,5 +83,20 @@ typedef struct {
 #define BSDR_XINPUT_B              0x2000
 #define BSDR_XINPUT_X              0x4000
 #define BSDR_XINPUT_Y              0x8000
+
+/* Map a source onto a virtual pad. Returns -1 to drop.
+ * LAN: assigned + decoded (assigned -1 = this headset is not presented).
+ * Cloud / Big Picture: first slot in 1..3 that is not the live headset pad. */
+static inline int bsdr_pad_route_lan(int assigned, int decoded) {
+    if (assigned < 0) return -1;
+    int s = assigned + decoded;
+    return (s >= 0 && s < BSDR_MAX_PADS) ? s : -1;
+}
+static inline int bsdr_pad_route_cloud(int as_pad, int headset_assigned) {
+    if (!as_pad) return -1;
+    for (int s = 1; s < BSDR_MAX_PADS; s++)
+        if (s != headset_assigned) return s;
+    return -1;
+}
 
 #endif /* BSDR_EVENTS_H */

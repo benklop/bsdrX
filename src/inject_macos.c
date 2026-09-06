@@ -178,7 +178,7 @@ void bsdr_injector_handle(bsdr_injector *inj, const bsdr_input_event *ev) {
             break;
         }
         case BSDR_EV_GAMEPAD:
-            BSDR_DEBUG("bsdr.inject", "gamepad event (unsupported on macOS)");
+            bsdr_pad_emit((int)ev->u.gamepad.slot, &ev->u.gamepad);
             break;
     }
 }
@@ -193,3 +193,10 @@ void bsdr_injector_destroy(bsdr_injector *inj) {
 
 /* macOS has no public touch-injection API — touch mode falls back to the mouse path above. */
 void bsdr_injector_touch_mode(int on) { (void)on; }
+
+void bsdr_pad_emit(int slot, const bsdr_gamepad *g) {
+    (void)g;
+    BSDR_DEBUG("bsdr.inject", "gamepad slot=%d (unsupported on macOS)", slot);
+}
+void bsdr_pad_release(int slot) { (void)slot; }
+void bsdr_pad_close(int slot) { (void)slot; }

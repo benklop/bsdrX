@@ -34,6 +34,19 @@ static size_t button(bsdr_input_event *e, bsdr_mouse_button b, bool down) {
     return 1;
 }
 
+/* One XINPUT_GAMEPAD (12 bytes) -> event. slot is the 0-based player index. */
+static void fill_pad(bsdr_input_event *e, const uint8_t *p, uint8_t slot) {
+    e->kind = BSDR_EV_GAMEPAD;
+    e->u.gamepad.buttons = rd_u16(p);
+    e->u.gamepad.lx = rd_i16(p + 2);
+    e->u.gamepad.ly = rd_i16(p + 4);
+    e->u.gamepad.rx = rd_i16(p + 6);
+    e->u.gamepad.ry = rd_i16(p + 8);
+    e->u.gamepad.lt = p[10];
+    e->u.gamepad.rt = p[11];
+    e->u.gamepad.slot = slot;
+}
+
 size_t bsdr_decode_binary(const uint8_t *data, size_t len,
                           bsdr_input_event *out, size_t max) {
     if (len < 1 || max < 1) return 0;
@@ -86,14 +99,7 @@ size_t bsdr_decode_binary(const uint8_t *data, size_t len,
         case BSDR_MSG_GAMEPAD:
             /* XINPUT_GAMEPAD: u16 buttons | i16 LX,LY,RX,RY | u8 LT,RT */
             if (len < 13) break;
-            e->kind = BSDR_EV_GAMEPAD;
-            e->u.gamepad.buttons = rd_u16(data + 1);
-            e->u.gamepad.lx = rd_i16(data + 3);
-            e->u.gamepad.ly = rd_i16(data + 5);
-            e->u.gamepad.rx = rd_i16(data + 7);
-            e->u.gamepad.ry = rd_i16(data + 9);
-            e->u.gamepad.lt = data[11];
-            e->u.gamepad.rt = data[12];
+            fill_pad(e, data + 1, 0);
             return 1;
         default:
             BSDR_INFO("bsdr.decode", "unknown input type 0x%02x (%zu bytes)",

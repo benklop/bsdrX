@@ -95,8 +95,25 @@ int main(void) {
           ev[0].kind == BSDR_EV_GAMEPAD &&
           (ev[0].u.gamepad.buttons & BSDR_XINPUT_A) &&
           ev[0].u.gamepad.lx == 32767 && ev[0].u.gamepad.ry == -32768 &&
-          ev[0].u.gamepad.lt == 255 && ev[0].u.gamepad.rt == 0,
+          ev[0].u.gamepad.lt == 255 && ev[0].u.gamepad.rt == 0 &&
+          ev[0].u.gamepad.slot == 0,
           "decode_gamepad");
+
+    /* extra bytes after the 12-byte XINPUT_GAMEPAD body are ignored */
+    uint8_t gp2[25];
+    memcpy(gp2, gp, 13);
+    put_u16(gp2 + 13, BSDR_XINPUT_B);
+    CHECK(bsdr_decode_binary(gp2, sizeof(gp2), ev, 4) == 1 && ev[0].u.gamepad.slot == 0,
+          "decode_gamepad_trailing_ignored");
+
+    /* 0x21 is not a recovered gamepad opcode */
+    uint8_t gp21[13];
+    memcpy(gp21, gp, 13); gp21[0] = 0x21;
+    CHECK(bsdr_decode_binary(gp21, sizeof(gp21), ev, 4) == 0, "decode_0x21_unknown");
+
+    /* short / leftover-byte gamepad frames */
+    CHECK(bsdr_decode_binary(gp, 12, ev, 4) == 0, "decode_gamepad_short");
+    CHECK(bsdr_decode_binary(gp, 14, ev, 4) == 1, "decode_gamepad_trailing_byte");
 
     /* bad frames */
     uint8_t bad = 0xFF;

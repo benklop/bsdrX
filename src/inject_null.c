@@ -37,3 +37,10 @@ void bsdr_injector_handle(bsdr_injector *inj, const bsdr_input_event *ev) {
 void bsdr_injector_destroy(bsdr_injector *inj) { free(inj); }
 
 void bsdr_injector_touch_mode(int on) { (void)on; }
+
+void bsdr_pad_emit(int slot, const bsdr_gamepad *g) {
+    (void)slot; (void)g;
+    BSDR_INFO("bsdr.inject", "[null-inject] gamepad slot=%d", slot);
+}
+void bsdr_pad_release(int slot) { (void)slot; }
+void bsdr_pad_close(int slot) { (void)slot; }

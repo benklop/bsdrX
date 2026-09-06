@@ -547,6 +547,12 @@ static void lan_input_main(void *arg) {
                     }
                 }
             }
+            if (e->kind == BSDR_EV_GAMEPAD) {
+                int base = a->app ? bsdr_app_headset_pad(a->app, a->remote_ip) : 0;
+                int s = bsdr_pad_route_lan(base, (int)e->u.gamepad.slot);
+                if (s < 0) continue;   /* not presented, or past player 4 */
+                e->u.gamepad.slot = (uint8_t)s;
+            }
             /* Terminal source: forward to the terminal (XVFB -> XTEST, PTY -> pty bytes) instead of
              * the machine's uinput. a->term is set by the video worker for the active session. */
             struct bsdr_term *term = a->term;
@@ -570,6 +576,10 @@ static void lan_input_main(void *arg) {
     bsdr_dtls_free(dtls);       /* end this DTLS session; the outer loop re-accepts on the next re-pair */
     }
     if (inj) bsdr_injector_destroy(inj);
+    if (a->app) {
+        int s = bsdr_app_headset_pad(a->app, a->remote_ip);
+        if (s >= 0) bsdr_pad_release(s);   /* keep the device; assignment stays */
+    }
     bsdr_udp_close(&udp);
     BSDR_INFO("bsdr.agent", "LAN input stopped (%ld events injected)", n_ev);
 }

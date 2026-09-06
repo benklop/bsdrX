@@ -89,7 +89,7 @@ enum {
     BSDR_MSG_WHEEL_V     = 0x0C,
     BSDR_MSG_WHEEL_H     = 0x0D,
     BSDR_MSG_KEY         = 0x0E,
-    BSDR_MSG_GAMEPAD     = 0x20
+    BSDR_MSG_GAMEPAD     = 0x20   /* XINPUT_GAMEPAD, 12 bytes */
 };
 
 /* --- Media parameters (reversed from BigSoup.dll; see the spec) ------------*/

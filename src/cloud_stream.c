@@ -461,7 +461,22 @@ static void cloud_data_msg(const uint8_t *data, size_t len, void *user) {
     /* try to decode as input opcodes (mouse/keyboard); harmless if it's room data */
     bsdr_input_event evs[32];
     size_t ne = bsdr_decode_binary(data, len, evs, 32);
-    for (size_t i = 0; i < ne; i++) { if (dc->inj) bsdr_injector_handle(dc->inj, &evs[i]); dc->n_ev++; }
+    int as_pad = dc->cs->app && bsdr_app_get_cloud_as_pad(dc->cs->app);
+    int cloud_slot = dc->cs->app ? bsdr_app_cloud_pad(dc->cs->app) : -1;
+    for (size_t i = 0; i < ne; i++) {
+        bsdr_input_event *e = &evs[i];
+        if (e->kind == BSDR_EV_GAMEPAD) {
+            if (cloud_slot < 0) continue;   /* Big Picture as a second controller is opt-in */
+            e->u.gamepad.slot = (uint8_t)cloud_slot;
+            bsdr_pad_emit(cloud_slot, &e->u.gamepad);
+            dc->n_ev++;
+            continue;
+        }
+        if (as_pad) continue;        /* presented as a gamepad only — don't fight the local mouse */
+        if (!dc->inj) dc->inj = bsdr_injector_create(1920, 1080);
+        if (dc->inj) bsdr_injector_handle(dc->inj, e);
+        dc->n_ev++;
+    }
     BSDR_DEBUG("bsdr.cloud", "data: %zuB DataChannel message (%zu events)", len, ne);
 }
 
@@ -481,7 +496,7 @@ static void cloud_input_main(void *arg) {
         }
     }
     if (dsrc == 0) cloud_src_record(cs->app, cs->scr.media_ip, 2, bsdr_udp_local_port(&udp));
-    struct cloud_data_ctx dc = { cs, bsdr_injector_create(1920, 1080), 0 };
+    struct cloud_data_ctx dc = { cs, NULL, 0 };   /* injector only if we inject mouse/kbd */
     uint8_t buf[4096];
 
     /* The relay's DataChannel: RAW SCTP-over-UDP (RFC 6951) is PROVEN to associate with the relay
@@ -591,6 +606,7 @@ static void cloud_input_main(void *arg) {
 
 done:
     if (dc.inj) bsdr_injector_destroy(dc.inj);
+    if (cs->app) bsdr_app_vacate_cloud_pad(cs->app);
     bsdr_udp_close(&udp);
     BSDR_INFO("bsdr.cloud", "data stopped (%ld events)", dc.n_ev);
 }
