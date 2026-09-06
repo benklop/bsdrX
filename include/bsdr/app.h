@@ -131,7 +131,7 @@ typedef struct bsdr_app {
     void *cloud_ws;               /* bsdr_cloud_ws* presence handle (host online) */
     void *cloud_stream;           /* bsdr_cloud_stream* active relay streaming */
     bool internet_sharing;        /* operator/Quest requested internet sharing */
-    bool cloud_auto_share;        /* follow the Quest's RDC screen (auto start/stop) */
+    bool cloud_auto_share;        /* share to Internet automatically when a headset pairs */
     int  cloud_screen_misses;     /* consecutive /rooms polls with no screen (debounce stop) */
     bool cloud_starting;          /* a stream-start is in flight (prevents a double-start race) */
     bool unpair_pending;          /* Quest unpaired (or heartbeat lost) — cloud teardown is on a grace timer */
@@ -340,6 +340,8 @@ void bsdr_app_set_blank(bsdr_app *a, bool on);   /* privacy screen-blank toggle 
 void bsdr_app_set_pointer_touch(bsdr_app *a, bool on);   /* input pointer mode: mouse vs real touch */
 void bsdr_app_set_cloud_as_pad(bsdr_app *a, bool on);    /* Big Picture / internet users → extra pad */
 bool bsdr_app_get_cloud_as_pad(bsdr_app *a);
+void bsdr_app_set_cloud_auto_share(bsdr_app *a, bool on); /* share on pair (persisted; default off) */
+bool bsdr_app_get_cloud_auto_share(bsdr_app *a);
 int  bsdr_app_cloud_pad(bsdr_app *a);                    /* live Big Picture slot, or -1 */
 void bsdr_app_vacate_cloud_pad(bsdr_app *a);             /* close/release that slot (stream end) */
 void bsdr_app_set_quest_pad(bsdr_app *a, const char *ip, int slot); /* -1 off, 0..3 player */

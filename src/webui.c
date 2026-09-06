@@ -189,6 +189,8 @@ static const char PAGE[] =
 "<div id=cloudshare class=row style='margin-top:12px;display:none'>"
 "<span id=sharelbl class=grow>Internet sharing: off</span>"
 "<button id=sharebtn class=p onclick=toggleShare()>Share to Internet</button></div>"
+"<div class=row id=autoshareerow style=display:none><label style=width:auto><input id=autoshare type=checkbox style=width:auto onchange=autoShareToggle()> "
+"Automatically share to Internet when a headset connects</label></div>"
 "<div class=row id=blankrow><label style=width:auto><input id=blank type=checkbox style=width:auto onchange=blankToggle()> "
 "Blank my physical screen while the headset is connected (privacy)</label></div>"
 "<div class=row><label style=width:auto><input id=ptouch type=checkbox style=width:auto onchange=pointerModeToggle()> "
@@ -699,6 +701,7 @@ static const char PAGE[] =
 "function blankToggle(){api('/api/blank',{on:blank.checked?1:0})}"
 "function pointerModeToggle(){api('/api/pointermode',{touch:ptouch.checked?1:0})}"
 "function cloudPadToggle(){api('/api/cloudpad',{on:cloudpad.checked?1:0})}"
+"function autoShareToggle(){api('/api/autoshare',{on:autoshare.checked?1:0})}"
 "function questPad(ip,sel){api('/api/questpad',{ip:ip,slot:+sel.value})}"
 "function bitrateSet(){api('/api/bitrate',{mbps:+brate.value||0})}"
 "function encoderSet(){api('/api/encoder',{gpu:+enc.value})}"
@@ -833,7 +836,9 @@ static const char PAGE[] =
 "if(document.getElementById('botjoinbtn')&&!botjoinbtn.disabled){botjoinbtn.dataset.joined=b.joined?'1':'0';botjoinbtn.textContent=b.joined?'Leave room':'Join my room';botjoinbtn.className=b.joined?'':'p';}}"
 "if(document.activeElement!==tlsinsecure)tlsinsecure.checked=!!s.tlsInsecure;"
 "cloudshare.style.display=s.cloud.loggedIn?'flex':'none';"
-"if(s.cloud.loggedIn){let sh=s.cloud.internetSharing;sharelbl.textContent='Internet sharing: '+(sh?'ON':'off');sharebtn.textContent=sh?'Stop sharing':'Share to Internet';sharebtn.className=sh?'danger':'p';}"
+"if(document.getElementById('autoshareerow'))autoshareerow.style.display=s.cloud.loggedIn?'flex':'none';"
+"if(s.cloud.loggedIn){let sh=s.cloud.internetSharing;sharelbl.textContent='Internet sharing: '+(sh?'ON':'off');sharebtn.textContent=sh?'Stop sharing':'Share to Internet';sharebtn.className=sh?'danger':'p';"
+"if(document.getElementById('autoshare')&&document.activeElement!==autoshare)autoshare.checked=!!s.cloud.autoShare;}"
 "quest.innerHTML=dot(s.quest.paired)+'<span>'+(s.quest.paired?('Connected: '+s.quest.name+' ('+s.quest.ip+')'):'No headset connected')+'</span>'+(s.quest.streaming?'<span class=pill>streaming</span>':'')+(s.quest.paired?'<button class=danger style=margin-left:auto onclick=disconnect()>Disconnect</button>':'');"
 "if(s.sniff){let sn=s.sniff;sniff.innerHTML=dot(sn.active)+'<span>'+(sn.active?('On — '+(sn.msg||'active')):('Off'+(sn.msg?(' — '+sn.msg):'')))+'</span>';snbtn.dataset.on=sn.want?'1':'0';snbtn.textContent=sn.want?'Stop mic':'Start mic';snbtn.className=sn.want?'danger':'p';"
 "if(document.activeElement!==snmethod&&sn.method!==undefined){snmethod.value=sn.method;snmethod.dataset.cur=sn.method;}"
@@ -1080,6 +1085,10 @@ static void handle(struct bsdr_webui *w, bsdr_socket_t c, const char *method,
     } else if (strcmp(method, "POST") == 0 && strcmp(path, "/api/cloudpad") == 0) {
         double on = 0; bsdr_json_get_double(body, "on", &on);
         bsdr_app_set_cloud_as_pad(a, on != 0);   /* Big Picture / internet input → player 2 */
+        respond(c, 200, "application/json", "{\"ok\":true}", 11);
+    } else if (strcmp(method, "POST") == 0 && strcmp(path, "/api/autoshare") == 0) {
+        double on = 0; bsdr_json_get_double(body, "on", &on);
+        bsdr_app_set_cloud_auto_share(a, on != 0);
         respond(c, 200, "application/json", "{\"ok\":true}", 11);
     } else if (strcmp(method, "POST") == 0 && strcmp(path, "/api/questpad") == 0) {
         char ip[64] = ""; double slot = 0;

@@ -162,7 +162,7 @@ void bsdr_app_init(bsdr_app *a) {
              "https://api.duckduckgo.com/?format=json&no_html=1&no_redirect=1");
     snprintf(a->cdp_endpoint, sizeof a->cdp_endpoint, "http://127.0.0.1:9222");   /* default CDP endpoint (disabled until enabled) */
     a->voiceai_tier = 1;          /* AI voice tier default: CPU */
-    a->cloud_auto_share = true;   /* follow the Quest's RDC screen (auto start/stop sharing) */
+    a->cloud_auto_share = false;  /* opt-in: share to Internet when a headset pairs */
     /* Cloud VIDEO is ON: the relay video is plain H.264 (NOT encrypted, as first thought) but uses
      * Bigscreen's CUSTOM raw fragmentation (not FU-A) — reversed from full.pcapng. bsdr_video_send_au_cloud
      * matches it. Cloud AUDIO is plain Opus RTP (pt 100, djb2 SSRC, ts+=480) + the 8-byte BigSoup
@@ -394,6 +394,8 @@ void bsdr_app_free(bsdr_app *a) {
 static int pad_blob_lookup(const char *blob, const char *ip);
 
 void bsdr_app_register_quest(bsdr_app *a, const char *ip) {
+    if (!a || !ip || !ip[0]) return;
+    int auto_use = 0;
     bsdr_mutex_lock(a->lock);
     uint64_t now = bsdr_now_ms();
     for (int i = 0; i < a->quest_count; i++) {
@@ -410,8 +412,13 @@ void bsdr_app_register_quest(bsdr_app *a, const char *ip) {
         q->last_seen_ms = now;
         q->pad_slot = pad_blob_lookup(a->quest_pads, ip);   /* 0 unless a saved assignment exists */
         BSDR_INFO("bsdr.app", "discovered Quest %s (%d total)", ip, a->quest_count);
+        /* First headset we see is Use'd automatically. A later one does not steal, and
+         * Disconnect's block still requires an explicit reselect. */
+        auto_use = (a->selected_quest_ip[0] == '\0' &&
+                    (a->blocked_quest_ip[0] == '\0' || strcmp(a->blocked_quest_ip, ip) != 0));
     }
     bsdr_mutex_unlock(a->lock);
+    if (auto_use) bsdr_app_select_quest(a, ip);
 }
 
 bool bsdr_app_quest_allowed(bsdr_app *a, const char *ip) {
@@ -434,6 +441,15 @@ void bsdr_app_block_quest(bsdr_app *a, const char *ip) {
 /* Grace window (ms) between an unpair / heartbeat loss and actually tearing the relay stream down, so a
  * quick pair-cycle doesn't drop the internet share (and remote viewers don't have to re-share). */
 #define BSDR_UNPAIR_GRACE_MS 10000
+
+/* Operator checkbox: request sharing once a headset is paired (tick starts the relay if logged in). */
+static void maybe_auto_share(bsdr_app *a) {
+    if (!a) return;
+    bsdr_mutex_lock(a->lock);
+    bool want = a->cloud_auto_share && a->quest_paired;
+    bsdr_mutex_unlock(a->lock);
+    if (want) bsdr_app_set_internet_sharing(a, true);
+}
 
 void bsdr_app_set_paired(bsdr_app *a, bool paired, const char *name, const char *ip) {
     bsdr_mutex_lock(a->lock);
@@ -459,6 +475,7 @@ void bsdr_app_set_paired(bsdr_app *a, bool paired, const char *name, const char 
         }
     }
     bsdr_mutex_unlock(a->lock);
+    maybe_auto_share(a);
 }
 
 /* Finalize the teardown (stop the relay, clear sharing + the pending flag). Lock must be held; returns
@@ -565,6 +582,23 @@ bool bsdr_app_get_cloud_as_pad(bsdr_app *a) {
     if (!a) return false;
     bsdr_mutex_lock(a->lock);
     bool v = a->cloud_as_pad;
+    bsdr_mutex_unlock(a->lock);
+    return v;
+}
+
+void bsdr_app_set_cloud_auto_share(bsdr_app *a, bool on) {
+    if (!a) return;
+    bsdr_mutex_lock(a->lock);
+    a->cloud_auto_share = on;
+    bsdr_mutex_unlock(a->lock);
+    settings_save(a);
+    if (on) maybe_auto_share(a);
+}
+
+bool bsdr_app_get_cloud_auto_share(bsdr_app *a) {
+    if (!a) return false;
+    bsdr_mutex_lock(a->lock);
+    bool v = a->cloud_auto_share;
     bsdr_mutex_unlock(a->lock);
     return v;
 }
@@ -1282,7 +1316,7 @@ static void settings_save(bsdr_app *a) {
     if (!settings_path(path, sizeof(path))) return;
     bsdr_mutex_lock(a->lock);
     int cpu = a->cpu_only ? 1 : 0, bro = a->bitrate_override, ptouch = a->pointer_touch ? 1 : 0;
-    int cpad = a->cloud_as_pad ? 1 : 0;
+    int cpad = a->cloud_as_pad ? 1 : 0, cashare = a->cloud_auto_share ? 1 : 0;
     char qpads[512]; snprintf(qpads, sizeof qpads, "%s", a->quest_pads);
     int encp = a->enc_level, lan1x = a->lan_1x ? 1 : 0, fcap = a->fps_cap, wopt = a->wifi_opt ? 1 : 0;
     int x264t = a->enc_x264_threads, vaapi = a->use_vaapi ? 1 : 0, kms = a->use_kmsgrab ? 1 : 0;
@@ -1312,6 +1346,7 @@ static void settings_save(bsdr_app *a) {
     if (!f) { BSDR_WARN("bsdr.app", "could not save settings to %s", path); return; }
     fprintf(f, "cloud_rtcp_pli=%d\n", cpli);
     fprintf(f, "cloud_as_pad=%d\n", cpad);
+    fprintf(f, "cloud_auto_share=%d\n", cashare);
     if (qpads[0]) fprintf(f, "quest_pads=%s\n", qpads);
     fprintf(f, "cpu_only=%d\nbitrate_override=%d\npointer_touch=%d\n"
                "sniff_method=%d\nsniff_relay_port=%d\nsniff_want=%d\nbot_mode=%s\nbot_follow=%d\n"
@@ -1372,6 +1407,7 @@ void bsdr_app_load_settings(bsdr_app *a) {
         else if (sscanf(line, "bitrate_override=%d", &v) == 1) a->bitrate_override = v > 0 ? v : 0;
         else if (sscanf(line, "pointer_touch=%d", &v) == 1)    a->pointer_touch = v ? true : false;
         else if (sscanf(line, "cloud_as_pad=%d", &v) == 1)     a->cloud_as_pad = v ? true : false;
+        else if (sscanf(line, "cloud_auto_share=%d", &v) == 1) a->cloud_auto_share = v ? true : false;
         else if (strncmp(line, "quest_pads=", 11) == 0) {
             snprintf(a->quest_pads, sizeof a->quest_pads, "%.511s", line + 11);
             for (int i = 0; i < a->quest_count; i++)
@@ -1521,6 +1557,7 @@ bool bsdr_app_login(bsdr_app *a, const char *email, const char *password) {
         a->cloud_ws = ws;
         bsdr_mutex_unlock(a->lock);
         if (!ws) BSDR_WARN("bsdr.app", "cloud presence WS did not connect (login OK)");
+        maybe_auto_share(a);
     }
     return ok;
 }
@@ -1590,6 +1627,7 @@ bool bsdr_app_restore_session(bsdr_app *a) {
     a->cloud_ws = ws;
     bsdr_mutex_unlock(a->lock);
     BSDR_INFO("bsdr.app", "restored Bigscreen session for %s", a->cloud_name);
+    maybe_auto_share(a);
     return true;
 }
 
@@ -2702,7 +2740,7 @@ size_t bsdr_app_status_json(bsdr_app *a, char *out, size_t cap) {
     snprintf(botmodes + bmo, sizeof botmodes - bmo, "]");
     int n = snprintf(out, cap,
         "{\"cloud\":{\"loggedIn\":%s,\"email\":\"%s\",\"name\":\"%s\",\"msg\":\"%s\","
-        "\"internetSharing\":%s},"
+        "\"internetSharing\":%s,\"autoShare\":%s},"
         "\"bot\":{\"loggedIn\":%s,\"email\":\"%s\",\"name\":\"%s\",\"msg\":\"%s\",\"joined\":%s,\"room\":\"%s\",\"mode\":\"%s\",\"modes\":%s,\"pluginBot\":%s,\"stopped\":%s,\"follow\":%s,\"loopback\":%s,\"solo\":%s,\"avatar\":\"%s\"},"
         "\"quest\":{\"paired\":%s,\"name\":\"%s\",\"ip\":\"%s\",\"streaming\":%s,\"paused\":%s},"
         "\"source\":{\"mode\":\"%s\",\"path\":\"%s\",\"path2\":\"%s\",\"audio\":%s,\"fileLoop\":%s,"
@@ -2719,7 +2757,7 @@ size_t bsdr_app_status_json(bsdr_app *a, char *out, size_t cap) {
         "\"compctl\":{\"want\":%s,\"vision\":%s,\"active\":%s,\"msg\":\"%s\",\"browserCtl\":%s,\"cdp\":\"%s\"},"
         "\"android\":%s,\"selected\":\"%s\",\"quests\":[",
         a->cloud_logged_in ? "true" : "false", esc_email, esc_name, esc_msg,
-        a->internet_sharing ? "true" : "false",
+        a->internet_sharing ? "true" : "false", a->cloud_auto_share ? "true" : "false",
         a->bot_logged_in ? "true" : "false", esc_botemail, esc_botname, esc_botmsg,
         a->bot_joined ? "true" : "false", esc_botroom, a->bot_mode[0] ? a->bot_mode : "audio", botmodes,
         a->bot_modes_n > 0 ? "true" : "false",

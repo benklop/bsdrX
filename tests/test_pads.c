@@ -73,6 +73,20 @@ int main(void) {
     bsdr_app a;
     bsdr_app_init(&a);
     CHECK(!bsdr_app_get_cloud_as_pad(&a), "cloud_as_pad_default_off");
+    CHECK(!bsdr_app_get_cloud_auto_share(&a), "auto_share_default_off");
+    CHECK(!bsdr_app_get_internet_sharing(&a), "share_default_off");
+    bsdr_app_set_paired(&a, true, "q", "10.0.0.5");
+    CHECK(!bsdr_app_get_internet_sharing(&a), "pair_does_not_share_when_auto_off");
+    bsdr_app_set_cloud_auto_share(&a, true);
+    CHECK(bsdr_app_get_cloud_auto_share(&a), "auto_share_on");
+    CHECK(bsdr_app_get_internet_sharing(&a), "checkbox_shares_when_already_paired");
+    bsdr_app_set_internet_sharing(&a, false);
+    bsdr_app_set_paired(&a, false, NULL, NULL);
+    bsdr_app_set_paired(&a, true, "q", "10.0.0.5");
+    CHECK(bsdr_app_get_internet_sharing(&a), "re_pair_auto_shares");
+    bsdr_app_set_cloud_auto_share(&a, false);
+    bsdr_app_set_internet_sharing(&a, false);
+    bsdr_app_set_paired(&a, false, NULL, NULL);
     CHECK(bsdr_app_headset_pad(&a, NULL) == 0, "headset_pad_null_default");
     CHECK(bsdr_app_headset_pad(&a, "10.0.0.5") == 0, "headset_pad_unknown_default");
 
@@ -82,6 +96,17 @@ int main(void) {
     CHECK(!bsdr_app_get_cloud_as_pad(&a), "cloud_as_pad_off");
 
     bsdr_app_register_quest(&a, "10.0.0.5");
+    CHECK(strcmp(a.selected_quest_ip, "10.0.0.5") == 0, "first_quest_auto_use");
+    bsdr_app_register_quest(&a, "10.0.0.6");
+    CHECK(strcmp(a.selected_quest_ip, "10.0.0.5") == 0, "second_quest_does_not_steal");
+    {
+        bsdr_app c;
+        bsdr_app_init(&c);
+        bsdr_app_block_quest(&c, "10.0.0.7");
+        bsdr_app_register_quest(&c, "10.0.0.7");
+        CHECK(c.selected_quest_ip[0] == '\0', "blocked_quest_not_auto_use");
+        bsdr_app_free(&c);
+    }
     CHECK(bsdr_app_headset_pad(&a, "10.0.0.5") == 0, "registered_default_p1");
     bsdr_app_set_quest_pad(&a, "10.0.0.5", 2);
     CHECK(bsdr_app_headset_pad(&a, "10.0.0.5") == 2, "set_quest_pad_p3");
@@ -116,11 +141,13 @@ int main(void) {
 
     /* persist + reload */
     bsdr_app_set_cloud_as_pad(&a, true);
+    bsdr_app_set_cloud_auto_share(&a, true);
     bsdr_app_set_quest_pad(&a, "10.0.0.5", 2);
     bsdr_app b;
     bsdr_app_init(&b);
     bsdr_app_load_settings(&b);
     CHECK(bsdr_app_get_cloud_as_pad(&b), "reload_cloud_as_pad");
+    CHECK(bsdr_app_get_cloud_auto_share(&b), "reload_auto_share");
     CHECK(bsdr_app_headset_pad(&b, "10.0.0.5") == 2, "reload_quest_pad_via_blob");
     bsdr_app_register_quest(&b, "10.0.0.5");
     CHECK(bsdr_app_headset_pad(&b, "10.0.0.5") == 2, "reload_then_register");
