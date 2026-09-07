@@ -79,6 +79,14 @@ int main(void) {
     CHECK(!bsdr_live_reconfig_fatal(1, 1), "reconfig_fail_keeps_prev");
     CHECK(!bsdr_live_reconfig_fatal(1, 0), "reconfig_fail_no_prev_retries");
 
+    /* VAAPI device rank: Arc (xe) beats iGPU (i915); a connected display beats rank. */
+    CHECK(bsdr_vaapi_drv_rank("xe") > bsdr_vaapi_drv_rank("i915"), "vaapi_rank_arc_over_igpu");
+    CHECK(bsdr_vaapi_drv_rank("i915") > bsdr_vaapi_drv_rank("amdgpu"), "vaapi_rank_igpu_over_amd");
+    CHECK(bsdr_vaapi_drv_rank("nvidia") < 0, "vaapi_rank_skip_nvidia");
+    CHECK(bsdr_vaapi_dev_better(0, 4, 1, 3), "vaapi_pick_connected_over_arc");
+    CHECK(!bsdr_vaapi_dev_better(1, 3, 0, 4), "vaapi_keep_connected_igpu");
+    CHECK(bsdr_vaapi_dev_better(1, 3, 1, 4), "vaapi_pick_arc_when_both_connected");
+
     /* Finding 2: host disconnect revokes the id; stale heartbeat is 410; /pair can succeed */
     CHECK(bsdr_control_auth_status(1, "abc", "", "abc") == 0, "pair_auth_ok");
     CHECK(bsdr_control_auth_status(0, "abc", "abc", "abc") == 410, "pair_auth_revoked");

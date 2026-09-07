@@ -23,6 +23,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 typedef struct bsdr_capture bsdr_capture;
 
@@ -35,7 +36,7 @@ typedef struct {
     int bitrate;           /* bps; default 8 Mbps */
     const char *encoder;   /* "h264_nvenc" / "libx264"; NULL -> nvenc then x264 */
     int cpu_only;          /* --cpu: force CPU scale/convert (no CUDA filter graph) */
-    int use_vaapi;         /* --vaapi: encode on the iGPU via VAAPI (frees the dGPU; AMD = radeonsi) */
+    int use_vaapi;         /* --vaapi: encode via VAAPI (Intel Arc/iGPU iHD, AMD radeonsi) */
     int use_kmsgrab;       /* --kmsgrab: capture via DRM/KMS instead of x11grab (zero-copy w/ --vaapi) */
     int enc_level;         /* encoder effort: 0 = quality (nvenc p7 + 2-pass / x264 veryfast),
                             * 1 = balanced (nvenc p6 + 1-pass / x264 faster),
@@ -116,6 +117,21 @@ static inline int bsdr_live_reconfig_kind(int region_changed, int quality_change
 static inline int bsdr_live_reconfig_fatal(int reopen_failed, int have_prev_capture) {
     (void)reopen_failed; (void)have_prev_capture;
     return 0;
+}
+
+/* Linux VAAPI device pick. Higher rank is preferred for encode (xe/Arc > i915 > amdgpu).
+ * When comparing two candidates, a connected display beats rank (kmsgrab must be the scanout GPU). */
+static inline int bsdr_vaapi_drv_rank(const char *kdrv) {
+    if (!kdrv || !kdrv[0]) return -1;
+    if (strcmp(kdrv, "xe") == 0) return 4;
+    if (strcmp(kdrv, "i915") == 0) return 3;
+    if (strcmp(kdrv, "amdgpu") == 0 || strcmp(kdrv, "radeon") == 0) return 2;
+    if (strcmp(kdrv, "nouveau") == 0) return 1;
+    return -1;
+}
+static inline int bsdr_vaapi_dev_better(int a_conn, int a_rank, int b_conn, int b_rank) {
+    if (b_conn != a_conn) return b_conn > a_conn;
+    return b_rank > a_rank;
 }
 
 /* Retune bitrate on the live encoder without tearing down the capture source (PipeWire portal). */

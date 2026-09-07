@@ -261,7 +261,7 @@ void bsdr_app_set_gpu_encode(bsdr_app *a, bool gpu) {
     a->cpu_only = !gpu;
     a->encoder_gen++;   /* live session reopens the capture (in place) with the new encoder */
     bsdr_mutex_unlock(a->lock);
-    BSDR_INFO("bsdr.app", "encoder set to %s", gpu ? "GPU (NVENC)" : "CPU (libx264)");
+    BSDR_INFO("bsdr.app", "encoder set to %s", gpu ? "GPU (NVENC/VAAPI)" : "CPU (libx264)");
     settings_save(a);
 }
 /* VAAPI (iGPU encode) + kmsgrab (DRM/KMS capture) — Linux only. Both bump encoder_gen so a running

@@ -41,6 +41,7 @@
 #include <string.h>
 #if !defined(_WIN32)
 #include <unistd.h>          /* access() — VAAPI render-node auto-detect */
+#include <dirent.h>          /* scan /sys/class/drm for the display card */
 #endif
 
 #if defined(__APPLE__)
@@ -102,6 +103,7 @@ struct bsdr_capture {
      * crop_w == 0 means no crop (the full frame is scaled). */
     int crop_x, crop_y, crop_w, crop_h;
     int64_t frame_index;
+    int raw_wrap;              /* x11grab/gdigrab rawvideo: wrap the packet, skip the decoder copy */
     volatile int force_key;    /* set by bsdr_capture_force_keyframe: next encoded frame is an IDR */
     const char *enc_name;
     struct bsdr_overlay *overlay;
@@ -525,8 +527,13 @@ static int open_encoder_vaapi(bsdr_capture *c, const bsdr_capture_config *cfg,
          * genuinely needs maxrate > bitrate). Mirrors the NVENC paths; --max-bitrate caps a thin uplink. */
         enc->rc_max_rate = (int64_t)cfg->bitrate * 2;
         enc->rc_buffer_size = (int64_t)cfg->bitrate * 2;
+        enc->flags |= AV_CODEC_FLAG_LOW_DELAY;
         av_opt_set(enc->priv_data, "rc_mode", "VBR", 0);
-        av_opt_set_int(enc->priv_data, "low_power", lp, 0);   /* VCN LP path; absent on older AMD -> fall back */
+        av_opt_set_int(enc->priv_data, "low_power", lp, 0);   /* Intel VDENC / newer AMD VCN; older AMD falls back */
+        av_opt_set_int(enc->priv_data, "async_depth", 1, 0); /* default 2 = +1 frame of encode queue */
+        /* enc_level maps to VAAPI speed (1=best .. 8=fastest). Unset at quality so the driver default stays. */
+        if (cfg->enc_level >= 1)
+            av_opt_set_int(enc->priv_data, "quality", cfg->enc_level >= 2 ? 8 : 6, 0);
         if (avcodec_open2(enc, codec, NULL) == 0) {
             c->enc = enc; c->enc_name = "h264_vaapi";
             BSDR_INFO("bsdr.capture", "h264_vaapi opened (low_power=%d)", lp);
@@ -537,15 +544,73 @@ static int open_encoder_vaapi(bsdr_capture *c, const bsdr_capture_config *cfg,
     return -1;
 }
 
-/* Auto-detect a VAAPI-capable render node and its correct libva driver, so a stray/wrong
- * LIBVA_DRIVER_NAME (e.g. a leftover 'iHD' Intel value on an AMD/NVIDIA box) can't silently break
- * hw encode. Scans /dev/dri/renderD128.. for a node whose KERNEL driver maps to an INSTALLED VA
- * driver .so; skips nvidia (no VAAPI encode). On success writes the node path to out_node and returns
- * the VA driver name (static string); NULL if none found. Linux-only. */
+/* Auto-detect a VAAPI-capable render node and its libva driver. Scans every renderD128.. node
+ * whose kernel driver maps to an installed VA .so (skips nvidia). Picks the best candidate:
+ *   prefer_display=1 → connected connector first, then driver rank (kmsgrab must be the scanout GPU)
+ *   prefer_display=0 → driver rank first (xe/Arc > i915 iGPU > amdgpu) so x11grab encodes on Arc
+ * Writes the render path to out_node and, when out_card is set, the matching /dev/dri/cardN.
+ * Returns the VA driver name (static string), or NULL. Linux-only. */
 #if !defined(_WIN32)
-static const char *vaapi_detect_node(char *out_node, size_t n) {
+static int drm_card_for_render(int render_idx) {
+    char path[128];
+    snprintf(path, sizeof path, "/sys/class/drm/renderD%d/device/drm", render_idx);
+    DIR *d = opendir(path);
+    if (!d) return -1;
+    int card = -1;
+    struct dirent *e;
+    while ((e = readdir(d))) {
+        if (strncmp(e->d_name, "card", 4) != 0 || e->d_name[4] < '0' || e->d_name[4] > '9') continue;
+        if (strchr(e->d_name + 4, '-')) continue;   /* card0-DP-1 lives elsewhere; belt and braces */
+        card = atoi(e->d_name + 4);
+        break;
+    }
+    closedir(d);
+    return card;
+}
+static int drm_card_connected(int card) {
+    DIR *d = opendir("/sys/class/drm");
+    if (!d) return 0;
+    char prefix[16];
+    snprintf(prefix, sizeof prefix, "card%d-", card);
+    size_t plen = strlen(prefix);
+    int yes = 0;
+    struct dirent *e;
+    while ((e = readdir(d))) {
+        if (strncmp(e->d_name, prefix, plen) != 0) continue;
+        char st[320];
+        snprintf(st, sizeof st, "/sys/class/drm/%s/status", e->d_name);
+        FILE *f = fopen(st, "r");
+        if (!f) continue;
+        char buf[16] = "";
+        if (fgets(buf, sizeof buf, f) && strncmp(buf, "connected", 9) == 0) yes = 1;
+        fclose(f);
+        if (yes) break;
+    }
+    closedir(d);
+    return yes;
+}
+static int have_cuda_device(void) {
+    return access("/dev/nvidiactl", F_OK) == 0 || access("/dev/nvidia0", F_OK) == 0;
+}
+static const char *vaapi_drv_for_kernel(const char *kdrv) {
     static const char *dri_dirs[] = { "/usr/lib/x86_64-linux-gnu/dri", "/usr/lib/dri",
                                       "/usr/lib64/dri", "/usr/lib/aarch64-linux-gnu/dri" };
+    const char *cands[2] = { NULL, NULL };
+    if      (!strcmp(kdrv, "amdgpu") || !strcmp(kdrv, "radeon")) { cands[0] = "radeonsi"; cands[1] = "r600"; }
+    else if (!strcmp(kdrv, "i915")   || !strcmp(kdrv, "xe"))     { cands[0] = "iHD";      cands[1] = "i965"; }
+    else if (!strcmp(kdrv, "nouveau"))                          { cands[0] = "nouveau"; }
+    else return NULL;
+    for (int ci = 0; ci < 2 && cands[ci]; ci++)
+        for (size_t di = 0; di < sizeof dri_dirs / sizeof dri_dirs[0]; di++) {
+            char so[256]; snprintf(so, sizeof so, "%s/%s_drv_video.so", dri_dirs[di], cands[ci]);
+            if (access(so, R_OK) == 0) return cands[ci];
+        }
+    return NULL;
+}
+static const char *vaapi_detect_node(char *out_node, size_t n, char *out_card, size_t cn,
+                                     int prefer_display) {
+    int best_rank = -1, best_conn = -1, best_idx = -1, best_card = -1;
+    const char *best_drv = NULL;
     for (int idx = 128; idx <= 135; idx++) {
         char node[32]; snprintf(node, sizeof node, "/dev/dri/renderD%d", idx);
         if (access(node, R_OK | W_OK) != 0) continue;
@@ -554,23 +619,31 @@ static const char *vaapi_detect_node(char *out_node, size_t n) {
         char kdrv[32] = "", line[128];
         while (fgets(line, sizeof line, f)) if (sscanf(line, "DRIVER=%31s", kdrv) == 1) break;
         fclose(f);
-        /* kernel driver -> candidate VA driver names (first with an installed .so wins) */
-        const char *cands[2] = { NULL, NULL };
-        if      (!strcmp(kdrv, "amdgpu") || !strcmp(kdrv, "radeon")) { cands[0] = "radeonsi"; cands[1] = "r600"; }
-        else if (!strcmp(kdrv, "i915")   || !strcmp(kdrv, "xe"))     { cands[0] = "iHD";      cands[1] = "i965"; }
-        else if (!strcmp(kdrv, "nouveau"))                          { cands[0] = "nouveau"; }
-        else continue;   /* nvidia (proprietary) + unknowns: no VAAPI encode path */
-        for (int ci = 0; ci < 2 && cands[ci]; ci++)
-            for (size_t di = 0; di < sizeof dri_dirs / sizeof dri_dirs[0]; di++) {
-                char so[256]; snprintf(so, sizeof so, "%s/%s_drv_video.so", dri_dirs[di], cands[ci]);
-                if (access(so, R_OK) == 0) { snprintf(out_node, n, "%s", node); return cands[ci]; }
-            }
+        int rank = bsdr_vaapi_drv_rank(kdrv);
+        if (rank < 0) continue;
+        const char *vadrv = vaapi_drv_for_kernel(kdrv);
+        if (!vadrv) continue;
+        int card = drm_card_for_render(idx);
+        int conn = (card >= 0) ? drm_card_connected(card) : 0;
+        int better;
+        if (best_rank < 0) better = 1;
+        else if (prefer_display) better = bsdr_vaapi_dev_better(best_conn, best_rank, conn, rank);
+        else better = (rank != best_rank) ? rank > best_rank : conn > best_conn;
+        if (!better) continue;
+        best_rank = rank; best_conn = conn; best_drv = vadrv;
+        best_idx = idx; best_card = card;
     }
-    return NULL;
+    if (best_idx < 0) return NULL;
+    snprintf(out_node, n, "/dev/dri/renderD%d", best_idx);
+    if (out_card && cn) {
+        if (best_card >= 0) snprintf(out_card, cn, "/dev/dri/card%d", best_card);
+        else out_card[0] = 0;
+    }
+    return best_drv;
 }
 #endif
 
-/* Build a VAAPI pipeline on the iGPU and open h264_vaapi. Two inputs:
+/* Build a VAAPI pipeline and open h264_vaapi. Two inputs:
  *  - x11grab (bgr0 sw frames): buffer -> hwupload -> scale_vaapi(nv12) -> buffersink
  *  - kmsgrab  (drm_prime hw frames): buffer -> hwmap(derive=vaapi) -> scale_vaapi(nv12) -> buffersink
  * VAAPI VPP (scale_vaapi) CAN do RGB->NV12 (unlike scale_cuda), so x11grab works directly. AMD needs
@@ -578,19 +651,22 @@ static const char *vaapi_detect_node(char *out_node, size_t n) {
  * on any failure. */
 static int setup_vaapi(bsdr_capture *c, const bsdr_capture_config *cfg, int ow, int oh) {
     const char *node = "/dev/dri/renderD128";
+    int hw_in = (c->dec->hw_frames_ctx != NULL) || (c->dec->pix_fmt == AV_PIX_FMT_DRM_PRIME);
 #if !defined(_WIN32)
     char detn[32];
-    const char *vadrv = vaapi_detect_node(detn, sizeof detn);
+    /* kmsgrab/dmabuf frames must stay on the scanout GPU; x11grab can encode on Arc even if an
+     * iGPU is also present (CPU blit already crossed devices). */
+    const char *vadrv = vaapi_detect_node(detn, sizeof detn, NULL, 0, hw_in);
     if (vadrv) {
         node = detn;
         setenv("LIBVA_DRIVER_NAME", vadrv, 1);   /* FORCE: overrides a stray/wrong value (e.g. iHD on AMD) */
-        BSDR_INFO("bsdr.capture", "VAAPI: auto-detected %s -> driver '%s'", node, vadrv);
+        BSDR_INFO("bsdr.capture", "VAAPI: auto-detected %s -> driver '%s'%s", node, vadrv,
+                  hw_in ? " (display GPU)" : "");
     } else {
         setenv("LIBVA_DRIVER_NAME", "radeonsi", 0);   /* fallback: AMD default, respect an existing value */
         BSDR_WARN("bsdr.capture", "VAAPI: no VA-capable render node auto-detected; trying %s", node);
     }
 #endif
-    int hw_in = (c->dec->hw_frames_ctx != NULL) || (c->dec->pix_fmt == AV_PIX_FMT_DRM_PRIME);
     if (av_hwdevice_ctx_create(&c->hw_device, AV_HWDEVICE_TYPE_VAAPI, node, NULL, 0) < 0) {
         BSDR_WARN("bsdr.capture", "VAAPI: no device on %s (install mesa-va-drivers?)", node);
         return -1;
@@ -628,7 +704,7 @@ static int setup_vaapi(bsdr_capture *c, const bsdr_capture_config *cfg, int ow, 
     if (!frames || open_encoder_vaapi(c, cfg, ow, oh, frames) < 0) { BSDR_WARN("bsdr.capture", "VAAPI: h264_vaapi open failed"); return -1; }
     c->gpu = av_frame_alloc();
     if (!c->gpu) return -1;
-    BSDR_INFO("bsdr.capture", "encoder h264_vaapi %dx%d @%dfps %dbps (High, iGPU: %s->scale_vaapi->vaapi nv12)",
+    BSDR_INFO("bsdr.capture", "encoder h264_vaapi %dx%d @%dfps %dbps (High, GPU: %s->scale_vaapi->vaapi nv12)",
               ow, oh, cfg->fps, cfg->bitrate, hw_in ? "kmsgrab" : "x11grab");
     return 0;
 }
@@ -795,6 +871,7 @@ bsdr_capture *bsdr_capture_open(const bsdr_capture_config *cfg_in) {
     char fr[16]; snprintf(fr, sizeof(fr), "%d", cfg.fps);
     av_dict_set(&opts, "framerate", fr, 0);
     av_dict_set(&opts, "draw_mouse", "1", 0);
+    av_dict_set(&opts, "thread_queue_size", "1", 0);   /* latest-wins; don't queue stale grabbed frames */
 
 #ifdef _WIN32
     /* Windows: GDI desktop grab. Region via offset_x/offset_y + video_size
@@ -847,18 +924,37 @@ bsdr_capture *bsdr_capture_open(const bsdr_capture_config *cfg_in) {
          * GPU driving the display. */
         ifmt = av_find_input_format("kmsgrab");
         if (ifmt) {
-            av_dict_set(&opts, "device", "/dev/dri/card0", 0);
-            av_dict_set(&opts, "framerate", fr, 0);
-            if (avformat_open_input(&c->fmt, "", ifmt, &opts) == 0) {
-                cfg.use_vaapi = 1;   /* kmsgrab frames are DRM hw surfaces */
-                goto input_ok;
+            char detn[32], detc[32];
+            detc[0] = 0;
+            vaapi_detect_node(detn, sizeof detn, detc, sizeof detc, 1);
+            const char *try_cards[2];
+            int ncard = 0;
+            if (detc[0]) try_cards[ncard++] = detc;
+            if (!detc[0] || strcmp(detc, "/dev/dri/card0") != 0)
+                try_cards[ncard++] = "/dev/dri/card0";
+            int opened = 0;
+            for (int ci = 0; ci < ncard; ci++) {
+                av_dict_set(&opts, "device", try_cards[ci], 0);
+                av_dict_set(&opts, "framerate", fr, 0);
+                av_dict_set(&opts, "thread_queue_size", "1", 0);
+                if (avformat_open_input(&c->fmt, "", ifmt, &opts) == 0) {
+                    BSDR_INFO("bsdr.capture", "kmsgrab opened %s", try_cards[ci]);
+                    cfg.use_vaapi = 1;   /* kmsgrab frames are DRM hw surfaces */
+                    opened = 1;
+                    break;
+                }
+                av_dict_free(&opts); opts = NULL;
+                av_dict_set(&opts, "framerate", fr, 0);
+                av_dict_set(&opts, "thread_queue_size", "1", 0);
             }
+            if (opened) goto input_ok;
             BSDR_WARN("bsdr.capture", "kmsgrab failed (need CAP_SYS_ADMIN? setcap cap_sys_admin+ep)");
         } else {
             BSDR_WARN("bsdr.capture", "kmsgrab not in this build");
         }
         av_dict_free(&opts); opts = NULL;
         av_dict_set(&opts, "framerate", fr, 0); av_dict_set(&opts, "draw_mouse", "1", 0);
+        av_dict_set(&opts, "thread_queue_size", "1", 0);
         if (cfg.width > 0 && cfg.height > 0) av_dict_set(&opts, "video_size", vsize, 0);
         cfg.use_kmsgrab = 0;
     }
@@ -879,11 +975,19 @@ bsdr_capture *bsdr_capture_open(const bsdr_capture_config *cfg_in) {
         BSDR_ERROR("bsdr.capture", "cannot open X display %s", url);
         av_dict_free(&opts); goto fail;
     }
+    c->fmt->probesize = 32;
+    c->fmt->max_analyze_duration = 0;
 input_ok:;
 #endif
     av_dict_free(&opts);
 have_input:;
-    if (avformat_find_stream_info(c->fmt, NULL) < 0) goto fail;
+    /* Desktop grabs (x11grab/kmsgrab/gdigrab) fill codecpar in read_header — skip
+     * avformat_find_stream_info so we don't wait on extra frames at open. Files and cameras still probe. */
+    if (c->is_file || c->is_webcam
+        || !c->fmt->nb_streams || !c->fmt->streams[0]->codecpar
+        || c->fmt->streams[0]->codecpar->width <= 0) {
+        if (avformat_find_stream_info(c->fmt, NULL) < 0) goto fail;
+    }
     if (c->is_file) {
         c->vstream = av_find_best_stream(c->fmt, AVMEDIA_TYPE_VIDEO, -1, -1, NULL, 0);
         if (c->vstream < 0) { BSDR_ERROR("bsdr.capture", "no video stream in file"); goto fail; }
@@ -902,7 +1006,14 @@ have_input:;
     c->dec = avcodec_alloc_context3(dec);
     if (!c->dec) goto fail;
     avcodec_parameters_to_context(c->dec, par);
-    if (avcodec_open2(c->dec, dec, NULL) < 0) goto fail;
+    /* x11grab/gdigrab deliver packed RGB in the packet — wrapping skips a full-frame rawvideo copy.
+     * Don't wrap DRM/hw frames (kmsgrab) or anything that actually needs a decoder. */
+    c->raw_wrap = par->codec_id == AV_CODEC_ID_RAWVIDEO
+               && !c->is_file && !c->is_webcam
+               && par->format != AV_PIX_FMT_DRM_PRIME
+               && par->format != AV_PIX_FMT_VAAPI
+               && par->format != AV_PIX_FMT_CUDA;
+    if (!c->raw_wrap && avcodec_open2(c->dec, dec, NULL) < 0) goto fail;
 
     if (c->is_stereo) {   /* second camera: its own decode pipeline (scaled into the right eye) */
         if (avformat_find_stream_info(c->fmt2, NULL) < 0) { BSDR_ERROR("bsdr.capture", "stereo: no info from right cam"); goto fail; }
@@ -997,27 +1108,34 @@ have_input_pw:;   /* PipeWire + raw-render paths join here: fmt/dec already set 
      * stream falls through to plain 2D — the synthesis engine is a plugin now (see plugins/2d_3d). */
 
     /* Encode pipeline, in preference order, each falling back to the next:
-     *  --vaapi  -> iGPU VAAPI (frees the dGPU; the only path that pairs with --kmsgrab)
-     *  default  -> CUDA/NVENC GPU (scale/convert off the CPU)
-     *  --cpu / any failure / 3D -> CPU sws_scale + nvenc/x264 */
-    if (cfg.use_vaapi && !c->use_vsrc) {
-        if (setup_vaapi(c, &cfg, ow, oh) == 0) { c->use_gpu = 1; return c; }
-        gpu_teardown(c);
-        BSDR_WARN("bsdr.capture", "VAAPI pipeline unavailable -> CPU scale/convert");
-#ifdef BSDR_HAVE_PIPEWIRE
-        /* dmabuf frames can ONLY be consumed by the VAAPI graph — the CPU sws path can't read a
-         * DRM_PRIME surface. If VAAPI just failed while dmabuf was negotiated, fail the open cleanly
-         * rather than crash on a NULL filtergraph. (Experimental --pw-dmabuf; the operator can drop
-         * the flag to get the CPU MAP_BUFFERS path.) */
-        if (c->pw_dmabuf_active) {
-            BSDR_ERROR("bsdr.capture", "--pw-dmabuf: VAAPI encoder unavailable, cannot consume dmabuf");
-            goto fail;
-        }
+     *  --vaapi / GPU with no NVIDIA -> VAAPI (Arc, Intel iGPU, AMD; the only path that pairs with kmsgrab)
+     *  GPU + NVIDIA               -> CUDA/NVENC
+     *  --cpu / any failure / 3D   -> CPU sws_scale + nvenc/x264 */
+    if (!c->use_vsrc) {
+        int want_vaapi = cfg.use_vaapi;
+#if !defined(_WIN32) && !defined(__APPLE__)
+        if (!want_vaapi && !cfg.cpu_only && !have_cuda_device())
+            want_vaapi = 1;   /* Arc / AMD: "GPU encode" means VAAPI, not a silent x264 fallback */
 #endif
-    } else if (!cfg.cpu_only && !c->use_vsrc) {
-        if (setup_gpu(c, &cfg, ow, oh) == 0) { c->use_gpu = 1; return c; }
-        gpu_teardown(c);
-        BSDR_WARN("bsdr.capture", "CUDA pipeline unavailable -> CPU scale/convert");
+        if (want_vaapi) {
+            if (setup_vaapi(c, &cfg, ow, oh) == 0) { c->use_gpu = 1; return c; }
+            gpu_teardown(c);
+            BSDR_WARN("bsdr.capture", "VAAPI pipeline unavailable -> CPU scale/convert");
+#ifdef BSDR_HAVE_PIPEWIRE
+            /* dmabuf frames can ONLY be consumed by the VAAPI graph — the CPU sws path can't read a
+             * DRM_PRIME surface. If VAAPI just failed while dmabuf was negotiated, fail the open cleanly
+             * rather than crash on a NULL filtergraph. (Experimental --pw-dmabuf; the operator can drop
+             * the flag to get the CPU MAP_BUFFERS path.) */
+            if (c->pw_dmabuf_active) {
+                BSDR_ERROR("bsdr.capture", "--pw-dmabuf: VAAPI encoder unavailable, cannot consume dmabuf");
+                goto fail;
+            }
+#endif
+        } else if (!cfg.cpu_only) {
+            if (setup_gpu(c, &cfg, ow, oh) == 0) { c->use_gpu = 1; return c; }
+            gpu_teardown(c);
+            BSDR_WARN("bsdr.capture", "CUDA pipeline unavailable -> CPU scale/convert");
+        }
     }
     if (open_encoder(c, &cfg, enc_w, enc_h) < 0) {
         BSDR_ERROR("bsdr.capture", "no usable H.264 encoder"); goto fail;
@@ -1118,6 +1236,11 @@ static int read_scale_eye(bsdr_capture *c, AVFormatContext *fmt, AVCodecContext 
         return 1;
     }
     return 0;
+}
+
+static void raw_done(bsdr_capture *c) {
+    av_frame_unref(c->raw);
+    if (c->raw_wrap) av_packet_unref(c->ipkt);
 }
 
 int bsdr_capture_frame(bsdr_capture *c, const uint8_t **au, size_t *len,
@@ -1256,6 +1379,19 @@ read_frame:
         return -1;
     }
     if (c->ipkt->stream_index != c->vstream) { av_packet_unref(c->ipkt); return 0; }
+    if (c->raw_wrap) {
+        av_frame_unref(c->raw);
+        c->raw->format = c->dec->pix_fmt;
+        c->raw->width  = c->dec->width;
+        c->raw->height = c->dec->height;
+        if (av_image_fill_arrays(c->raw->data, c->raw->linesize, c->ipkt->data,
+                                 (enum AVPixelFormat)c->raw->format,
+                                 c->raw->width, c->raw->height, 1) < 0) {
+            av_packet_unref(c->ipkt);
+            return 0;
+        }
+        goto have_raw;
+    }
     if (avcodec_send_packet(c->dec, c->ipkt) < 0) { av_packet_unref(c->ipkt); return 0; }
     av_packet_unref(c->ipkt);
     if (avcodec_receive_frame(c->dec, c->raw) != 0) return 0;
@@ -1286,8 +1422,8 @@ have_raw:;   /* jump target for the PipeWire / raw-render fast-paths above (both
         /* GPU: upload + scale + convert to NV12 on the CUDA device, feed nvenc a hw frame. The CPU
          * overlay can't touch a GPU surface, so the status overlay is CPU-path only. */
         c->raw->pts = c->frame_index;
-        if (av_buffersrc_add_frame(c->fg_src, c->raw) < 0) { av_frame_unref(c->raw); return 0; }
-        av_frame_unref(c->raw);
+        if (av_buffersrc_add_frame(c->fg_src, c->raw) < 0) { raw_done(c); return 0; }
+        raw_done(c);
         av_frame_unref(c->gpu);
         if (av_buffersink_get_frame(c->fg_sink, c->gpu) < 0) return 0;
         c->gpu->pts = c->frame_index;
@@ -1313,7 +1449,7 @@ have_raw:;   /* jump target for the PipeWire / raw-render fast-paths above (both
         apply_2d3d(c);
         c->yuv->pts = c->frame_index;   /* monotonic */
         c->have_frame = 1;              /* c->yuv/src now hold a frame we can re-encode while paused */
-        av_frame_unref(c->raw);
+        raw_done(c);
         apply_video_fx(c->yuv);         /* plugin same-dims video-fx chain (faceswap plugin, etc.) */
         enc_in = c->yuv;
     }

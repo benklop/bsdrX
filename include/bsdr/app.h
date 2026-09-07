@@ -142,7 +142,7 @@ typedef struct bsdr_app {
     bool video_decoupled;         /* --video-decoupled: relay runs its own capture+encoder (default:
                                    * coupled — relay the single LAN encode, half the capture/encode cost) */
     bool cpu_only;                /* --cpu: force CPU scale/convert (default: try CUDA GPU pipeline) */
-    bool use_vaapi;               /* --vaapi: encode on the iGPU via VAAPI */
+    bool use_vaapi;               /* --vaapi: encode via VAAPI (Intel Arc/iGPU, AMD) */
     bool use_kmsgrab;             /* --kmsgrab: DRM/KMS capture (zero-copy with --vaapi) */
     int  enc_level;               /* encoder effort: 0 quality (default) / 1 balanced / 2 performance */
     int  enc_x264_threads;        /* opt-in (P6.9): >1 = N x264 frame threads on the live --cpu path */

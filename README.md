@@ -635,13 +635,14 @@ across restarts. The owner can also drive all of this by voice (the admin tools:
 - **Bitrate override** — the headset normally dictates the bitrate; set a value in the
   panel (or `--max-bitrate BPS`) to override it live. `0` follows the headset.
 - **Encoder** — **CPU (x264)** keeps low-bitrate text crisp (best for desktops);
-  **GPU** offloads the CPU and allows higher bitrate. The GPU path is NVENC/CUDA on
-  Linux/Windows, VAAPI on Linux iGPUs (`--vaapi`), VideoToolbox on macOS, and
-  MediaCodec on Android. `--cpu` forces full software; `--kmsgrab` is a zero-copy
-  capture path on Linux with `--vaapi`. VAAPI **auto-detects** the render node and its
-  libva driver (e.g. `amdgpu`→`radeonsi`, `i915`→`iHD`; NVIDIA is skipped — use NVENC),
-  and **forces** the correct `LIBVA_DRIVER_NAME`, so a stray/wrong value in your
-  environment (a leftover `iHD` on an AMD box is the classic one) can't break hw encode.
+  **GPU** offloads the CPU and allows higher bitrate. The GPU path is NVENC/CUDA when
+  NVIDIA is present, **VAAPI** on Linux Intel Arc / iGPU / AMD (automatic when there
+  is no NVIDIA device; `--vaapi` forces it), VideoToolbox on macOS, and MediaCodec
+  on Android. `--cpu` forces full software; `--kmsgrab` is a zero-copy capture path
+  on Linux with VAAPI. VAAPI **auto-detects** the render node and its libva driver
+  (`xe`/Arc preferred over `i915` iGPU for encode; `amdgpu`→`radeonsi`; NVIDIA is
+  skipped), and **forces** the correct `LIBVA_DRIVER_NAME`. kmsgrab uses the card
+  that actually has a connected display, not always `card0`.
 - **Encoder mode** — **Quality** (default), **Balanced**, or **Performance**
   (`--encoder-mode quality|balanced|performance` or the panel dropdown, persisted).
   Higher levels use a lighter preset — Quality = NVENC `p7` + 2-pass; Balanced =
@@ -652,7 +653,7 @@ across restarts. The owner can also drive all of this by voice (the admin tools:
   **Max FPS** or `--fps 24`), **lower resolution** (set it on the headset), and
   **Balanced/Performance** encoder mode. Note the desktop encode is already GPU-offloaded when GPU
   is selected (capture + upload are the residual CPU cost on X11, which NVFBC-less X11 can't
-  avoid — `--kmsgrab`+`--vaapi`, or the panel's **iGPU (Linux)** checkboxes, moves more of it off
+  avoid — `--kmsgrab`+VAAPI, or the panel's **Intel/AMD GPU (Linux)** checkboxes, moves more of it off
   the CPU; both apply live and are persisted, kmsgrab needs `CAP_SYS_ADMIN`). For a software (`--cpu`) host that
   still can't keep up at high resolution, **x264 threads** (panel field or `--x264-threads N`)
   spreads the software encode across N cores while keeping one NAL per frame — at the cost of
