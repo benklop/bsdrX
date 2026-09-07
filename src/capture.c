@@ -625,10 +625,8 @@ static const char *vaapi_detect_node(char *out_node, size_t n, char *out_card, s
         if (!vadrv) continue;
         int card = drm_card_for_render(idx);
         int conn = (card >= 0) ? drm_card_connected(card) : 0;
-        int better;
-        if (best_rank < 0) better = 1;
-        else if (prefer_display) better = bsdr_vaapi_dev_better(best_conn, best_rank, conn, rank);
-        else better = (rank != best_rank) ? rank > best_rank : conn > best_conn;
+        int better = (best_rank < 0) ||
+            bsdr_vaapi_pick_better(prefer_display, best_conn, best_rank, conn, rank);
         if (!better) continue;
         best_rank = rank; best_conn = conn; best_drv = vadrv;
         best_idx = idx; best_card = card;
@@ -1008,11 +1006,11 @@ have_input:;
     avcodec_parameters_to_context(c->dec, par);
     /* x11grab/gdigrab deliver packed RGB in the packet — wrapping skips a full-frame rawvideo copy.
      * Don't wrap DRM/hw frames (kmsgrab) or anything that actually needs a decoder. */
-    c->raw_wrap = par->codec_id == AV_CODEC_ID_RAWVIDEO
-               && !c->is_file && !c->is_webcam
-               && par->format != AV_PIX_FMT_DRM_PRIME
-               && par->format != AV_PIX_FMT_VAAPI
-               && par->format != AV_PIX_FMT_CUDA;
+    int hw_pf = par->format == AV_PIX_FMT_DRM_PRIME
+             || par->format == AV_PIX_FMT_VAAPI
+             || par->format == AV_PIX_FMT_CUDA;
+    c->raw_wrap = bsdr_raw_wrap_ok(c->is_file, c->is_webcam,
+                                   par->codec_id == AV_CODEC_ID_RAWVIDEO, hw_pf);
     if (!c->raw_wrap && avcodec_open2(c->dec, dec, NULL) < 0) goto fail;
 
     if (c->is_stereo) {   /* second camera: its own decode pipeline (scaled into the right eye) */
@@ -1112,10 +1110,10 @@ have_input_pw:;   /* PipeWire + raw-render paths join here: fmt/dec already set 
      *  GPU + NVIDIA               -> CUDA/NVENC
      *  --cpu / any failure / 3D   -> CPU sws_scale + nvenc/x264 */
     if (!c->use_vsrc) {
-        int want_vaapi = cfg.use_vaapi;
 #if !defined(_WIN32) && !defined(__APPLE__)
-        if (!want_vaapi && !cfg.cpu_only && !have_cuda_device())
-            want_vaapi = 1;   /* Arc / AMD: "GPU encode" means VAAPI, not a silent x264 fallback */
+        int want_vaapi = bsdr_want_vaapi(cfg.use_vaapi, cfg.cpu_only, have_cuda_device());
+#else
+        int want_vaapi = cfg.use_vaapi;
 #endif
         if (want_vaapi) {
             if (setup_vaapi(c, &cfg, ow, oh) == 0) { c->use_gpu = 1; return c; }

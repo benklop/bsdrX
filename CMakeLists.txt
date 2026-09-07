@@ -202,6 +202,10 @@ if(BSDR_BUILD_TESTS)
   target_link_libraries(test_protocol PRIVATE bsdr_core)
   add_test(NAME protocol COMMAND test_protocol)
 
+  add_executable(test_capture tests/test_capture.c)
+  target_link_libraries(test_capture PRIVATE bsdr_core)
+  add_test(NAME capture COMMAND test_capture)
+
   add_executable(test_overlay tests/test_overlay.c)
   target_link_libraries(test_overlay PRIVATE bsdr_core)
   add_test(NAME overlay COMMAND test_overlay)

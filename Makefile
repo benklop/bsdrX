@@ -261,6 +261,7 @@ ifneq ($(EXEEXT),.exe)
 endif
 endif
 TESTS := $(BUILD)/test_input_decode$(EXEEXT) $(BUILD)/test_pads$(EXEEXT) $(BUILD)/test_protocol$(EXEEXT) \
+         $(BUILD)/test_capture$(EXEEXT) \
          $(BUILD)/test_transport$(EXEEXT) $(BUILD)/test_overlay$(EXEEXT) \
          $(BUILD)/test_compcontrol$(EXEEXT) $(BUILD)/test_voice$(EXEEXT) \
          $(BUILD)/test_acl$(EXEEXT) $(BUILD)/test_roster$(EXEEXT) $(BUILD)/test_audio_policy$(EXEEXT) \

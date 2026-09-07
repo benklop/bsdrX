@@ -133,6 +133,23 @@ static inline int bsdr_vaapi_dev_better(int a_conn, int a_rank, int b_conn, int 
     if (b_conn != a_conn) return b_conn > a_conn;
     return b_rank > a_rank;
 }
+/* prefer_display=1: connected first (kmsgrab). prefer_display=0: rank first (x11grab encode on Arc). */
+static inline int bsdr_vaapi_pick_better(int prefer_display,
+                                         int a_conn, int a_rank, int b_conn, int b_rank) {
+    if (prefer_display) return bsdr_vaapi_dev_better(a_conn, a_rank, b_conn, b_rank);
+    if (b_rank != a_rank) return b_rank > a_rank;
+    return b_conn > a_conn;
+}
+/* GPU encode uses VAAPI when forced, or when there is no NVIDIA device for NVENC. */
+static inline int bsdr_want_vaapi(int use_vaapi, int cpu_only, int have_cuda) {
+    if (use_vaapi) return 1;
+    if (cpu_only) return 0;
+    return !have_cuda;
+}
+/* x11grab/gdigrab rawvideo wrap: skip the decoder copy. Never wrap files, cameras, or hw surfaces. */
+static inline int bsdr_raw_wrap_ok(int is_file, int is_webcam, int is_rawvideo, int is_hw_pixfmt) {
+    return is_rawvideo && !is_file && !is_webcam && !is_hw_pixfmt;
+}
 
 /* Retune bitrate on the live encoder without tearing down the capture source (PipeWire portal). */
 int bsdr_capture_retune(bsdr_capture *c, int bitrate);
