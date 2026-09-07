@@ -594,17 +594,24 @@ static int have_cuda_device(void) {
 }
 static const char *vaapi_drv_for_kernel(const char *kdrv) {
     static const char *dri_dirs[] = { "/usr/lib/x86_64-linux-gnu/dri", "/usr/lib/dri",
-                                      "/usr/lib64/dri", "/usr/lib/aarch64-linux-gnu/dri" };
+                                      "/usr/lib64/dri", "/usr/lib/aarch64-linux-gnu/dri",
+                                      "/usr/lib/va", "/usr/lib64/va" };
     const char *cands[2] = { NULL, NULL };
     if      (!strcmp(kdrv, "amdgpu") || !strcmp(kdrv, "radeon")) { cands[0] = "radeonsi"; cands[1] = "r600"; }
     else if (!strcmp(kdrv, "i915")   || !strcmp(kdrv, "xe"))     { cands[0] = "iHD";      cands[1] = "i965"; }
     else if (!strcmp(kdrv, "nouveau"))                          { cands[0] = "nouveau"; }
     else return NULL;
-    for (int ci = 0; ci < 2 && cands[ci]; ci++)
+    for (int ci = 0; ci < 2 && cands[ci]; ci++) {
+        const char *extra = getenv("LIBVA_DRIVERS_PATH");
+        if (extra && extra[0]) {
+            char so[256]; snprintf(so, sizeof so, "%s/%s_drv_video.so", extra, cands[ci]);
+            if (access(so, R_OK) == 0) return cands[ci];
+        }
         for (size_t di = 0; di < sizeof dri_dirs / sizeof dri_dirs[0]; di++) {
             char so[256]; snprintf(so, sizeof so, "%s/%s_drv_video.so", dri_dirs[di], cands[ci]);
             if (access(so, R_OK) == 0) return cands[ci];
         }
+    }
     return NULL;
 }
 static const char *vaapi_detect_node(char *out_node, size_t n, char *out_card, size_t cn,
@@ -669,6 +676,20 @@ static int setup_vaapi(bsdr_capture *c, const bsdr_capture_config *cfg, int ow, 
         BSDR_WARN("bsdr.capture", "VAAPI: no device on %s (install mesa-va-drivers?)", node);
         return -1;
     }
+    /* kmsgrab/wrapped_avframe leaves dec->hw_frames_ctx empty until a frame is decoded.
+     * hwmap then fails graph config ("Unsupported format: drm_prime"). Prime from one frame. */
+    if (hw_in && !c->dec->hw_frames_ctx && c->ipkt && c->raw) {
+        if (av_read_frame(c->fmt, c->ipkt) == 0 &&
+            avcodec_send_packet(c->dec, c->ipkt) == 0 &&
+            avcodec_receive_frame(c->dec, c->raw) == 0 &&
+            c->raw->hw_frames_ctx) {
+            c->dec->hw_frames_ctx = av_buffer_ref(c->raw->hw_frames_ctx);
+        }
+        av_packet_unref(c->ipkt);
+        av_frame_unref(c->raw);
+        if (!c->dec->hw_frames_ctx)
+            BSDR_WARN("bsdr.capture", "VAAPI: kmsgrab produced no hw_frames_ctx");
+    }
     c->fg = avfilter_graph_alloc();
     if (!c->fg) return -1;
     AVRational tb = c->fmt->streams[0]->time_base;
@@ -697,7 +718,15 @@ static int setup_vaapi(bsdr_capture *c, const bsdr_capture_config *cfg, int ow, 
     if (avfilter_link(c->fg_src, 0, map, 0) < 0) return -1;
     if (avfilter_link(map, 0, scale, 0) < 0) return -1;
     if (avfilter_link(scale, 0, c->fg_sink, 0) < 0) return -1;
-    if (avfilter_graph_config(c->fg, NULL) < 0) { BSDR_WARN("bsdr.capture", "VAAPI: graph config failed"); return -1; }
+    {
+        int ge = avfilter_graph_config(c->fg, NULL);
+        if (ge < 0) {
+            char err[128];
+            av_strerror(ge, err, sizeof err);
+            BSDR_WARN("bsdr.capture", "VAAPI: graph config failed (%s)", err);
+            return -1;
+        }
+    }
     AVBufferRef *frames = av_buffersink_get_hw_frames_ctx(c->fg_sink);
     if (!frames || open_encoder_vaapi(c, cfg, ow, oh, frames) < 0) { BSDR_WARN("bsdr.capture", "VAAPI: h264_vaapi open failed"); return -1; }
     c->gpu = av_frame_alloc();
@@ -966,6 +995,7 @@ bsdr_capture *bsdr_capture_open(const bsdr_capture_config *cfg_in) {
         }
     }
 #endif
+fallback_x11:
     ifmt = av_find_input_format("x11grab");
     if (!ifmt) { BSDR_ERROR("bsdr.capture", "x11grab not available"); av_dict_free(&opts); goto fail; }
     snprintf(url, sizeof(url), "%s+%d,%d", cfg.display, cfg.x, cfg.y);
@@ -1119,6 +1149,21 @@ have_input_pw:;   /* PipeWire + raw-render paths join here: fmt/dec already set 
             if (setup_vaapi(c, &cfg, ow, oh) == 0) { c->use_gpu = 1; return c; }
             gpu_teardown(c);
             BSDR_WARN("bsdr.capture", "VAAPI pipeline unavailable -> CPU scale/convert");
+#if !defined(_WIN32) && !defined(__APPLE__)
+            /* kmsgrab delivers DRM_PRIME; sws cannot convert it. Retry as x11grab. */
+            if (cfg.use_kmsgrab) {
+                BSDR_WARN("bsdr.capture", "kmsgrab needs VAAPI; falling back to x11grab");
+                avformat_close_input(&c->fmt);
+                avcodec_free_context(&c->dec);
+                cfg.use_kmsgrab = 0;
+                av_dict_free(&opts); opts = NULL;
+                av_dict_set(&opts, "framerate", fr, 0);
+                av_dict_set(&opts, "draw_mouse", "1", 0);
+                av_dict_set(&opts, "thread_queue_size", "1", 0);
+                if (cfg.width > 0 && cfg.height > 0) av_dict_set(&opts, "video_size", vsize, 0);
+                goto fallback_x11;
+            }
+#endif
 #ifdef BSDR_HAVE_PIPEWIRE
             /* dmabuf frames can ONLY be consumed by the VAAPI graph — the CPU sws path can't read a
              * DRM_PRIME surface. If VAAPI just failed while dmabuf was negotiated, fail the open cleanly

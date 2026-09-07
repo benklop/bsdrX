@@ -71,6 +71,10 @@ RUN set -eux; cd /tmp; \
     git clone --depth 1 --branch n12.2.72.0 https://github.com/FFmpeg/nv-codec-headers.git; \
     cd nv-codec-headers && make install PREFIX=$PFX >/dev/null 2>&1; rm -rf /tmp/nv-codec-headers
 
+# libva for h264_vaapi / kmsgrab (kept off the first apt layer so dep rebuilds stay cached).
+RUN apt-get update && apt-get install -y --no-install-recommends libva-dev \
+    && rm -rf /var/lib/apt/lists/*
+
 # ---- MINIMAL ffmpeg: only what bsdrX uses ----
 RUN set -eux; export PKG_CONFIG_PATH="$PFX/lib/pkgconfig:${PKG_CONFIG_PATH:-}"; cd /tmp; \
     curl -fsSL https://ffmpeg.org/releases/ffmpeg-6.1.2.tar.xz | tar xJ; \
@@ -78,15 +82,15 @@ RUN set -eux; export PKG_CONFIG_PATH="$PFX/lib/pkgconfig:${PKG_CONFIG_PATH:-}"; 
     ./configure --prefix=$PFX --enable-shared --disable-static \
       --disable-everything --disable-doc --disable-programs --disable-network \
       --enable-gpl --enable-version3 \
-      --enable-libx264 --enable-nvenc \
-      --enable-encoder=libx264,h264_nvenc,mjpeg,rawvideo \
-      --enable-decoder=h264,mjpeg,rawvideo,pcm_s16le \
+      --enable-libx264 --enable-nvenc --enable-vaapi --enable-libdrm \
+      --enable-encoder=libx264,h264_nvenc,h264_vaapi,mjpeg,rawvideo \
+      --enable-decoder=h264,mjpeg,rawvideo,pcm_s16le,wrapped_avframe \
       --enable-parser=h264,mjpeg \
       --enable-demuxer=h264,mov,matroska,mpegts,mjpeg,rawvideo,image2 \
       --enable-muxer=rawvideo,mjpeg,mp4,h264,image2 \
       --enable-protocol=file,pipe \
-      --enable-libxcb --enable-indev=x11grab \
-      --enable-filter=scale,format,null,copy,hflip,vflip,transpose \
+      --enable-libxcb --enable-indev=x11grab --enable-indev=kmsgrab \
+      --enable-filter=scale,format,null,copy,hflip,vflip,transpose,hwmap,hwupload,hwdownload,scale_vaapi \
       --enable-bsf=h264_mp4toannexb,extract_extradata \
       --enable-swscale --enable-swresample --enable-avdevice \
       --extra-cflags="-I$PFX/include" --extra-ldflags="-L$PFX/lib"; \

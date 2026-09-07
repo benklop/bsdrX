@@ -2,6 +2,7 @@
 # build-linux-bundle.sh — produce a distributable Linux bundle for bsdrX:
 #   * a portable AppImage (runs across distros; bundles a MINIMAL ffmpeg + media deps)
 #   * a .deb package (installs to /opt/bsdrX + a /usr/bin symlink + the uinput udev rule)
+#   * a Batocera SHARE tarball (persist /userdata/opt/bsdrX + user service; see packaging/batocera)
 #   * bsdrX.zip containing both, plus README.md and LICENSE.md
 #
 # Designed to run inside the bsdrx-linux-deps build image (Debian 12 = glibc 2.36,
@@ -313,6 +314,13 @@ chmod 0755 "$PKG/DEBIAN/postinst"
 dpkg-deb --build --root-owner-group "$PKG" "$OUT/bsdr-agent_${VERSION#v}_${DEBARCH}.deb"
 DEB="$(ls -1 "$OUT"/bsdr-agent_*_"${DEBARCH}".deb | tail -1)"
 echo ">> deb -> $DEB"
+
+# Batocera: same /opt/bsdrX tree + SHARE installer (no dpkg on the guest).
+if [ -x "$SRC/scripts/pack-batocera.sh" ]; then
+  bash "$SRC/scripts/pack-batocera.sh" --opt "$PKG/opt/bsdrX" --out "$OUT" --version "$VERSION"
+else
+  echo ">> WARN: pack-batocera.sh missing — skip Batocera tarball"
+fi
 
 # ---- 4. zip everything for distribution --------------------------------------
 ZIPTMP="$WORK/zip"; mkdir -p "$ZIPTMP"

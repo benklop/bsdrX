@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # build-linux.sh — inject both Bigscreen app keys into cloud.h, then build
-# the Linux AppImage + .deb (docker image bsdrx-linux-deps).
+# the Linux AppImage + .deb + Batocera tarball (docker image bsdrx-linux-deps).
 #
 #   ./scripts/build-linux.sh              # fetch+inject, then ./distribute.sh linux
 #   ./scripts/build-linux.sh --no-cache   # force a from-scratch docker image rebuild

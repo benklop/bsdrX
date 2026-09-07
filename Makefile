@@ -419,9 +419,18 @@ linux:
 	scripts/fetch-cloud-key.sh --inject --client
 	+$(MAKE) native
 
-# AppImage + .deb: same key inject, then ./distribute.sh linux. Extra args: make appimage -- --no-cache
+# AppImage + .deb + Batocera tarball: same key inject, then ./distribute.sh linux.
+# Extra args: make appimage -- --no-cache
 appimage:
 	scripts/build-linux.sh
+
+# Pack dist/bsdr-agent_*_batocera.tar.gz from an already-built Linux .deb (no docker).
+.PHONY: batocera
+batocera:
+	@ver=$$(sed -n 's/.*BSDR_VERSION[[:space:]]*"\([^"]*\)".*/\1/p' include/bsdr/version.h); \
+	deb="dist/bsdr-agent_$${ver}_amd64.deb"; \
+	test -f "$$deb" || { echo "make batocera: missing $$deb — run ./distribute.sh linux first" >&2; exit 1; }; \
+	./scripts/pack-batocera.sh --deb "$$deb" --out dist --version "$$ver"
 
 # `windows` = the full media-capable mingw build (was `windows-media`). Kept as an
 # alias so scripts/build-win-bundle.sh (make windows-media) keeps working.

@@ -916,6 +916,14 @@ ffmpeg (`libavcodec/avformat/avdevice/avutil/swscale-dev`), `libopus-dev`,
 capture needs an X11 display. For the router companion: `make micrelay` (static, bundled
 libpcap).
 
+**AppImage / `.deb` / Batocera.** `make appimage` (or `./distribute.sh linux`) builds
+the portable Linux bundle in Docker. That also emits
+`dist/bsdr-agent_<ver>_batocera.tar.gz`: the same `/opt/bsdrX` tree plus an
+`install.sh` that persists it on Batocera SHARE (`/userdata/opt/bsdrX`), installs the
+`bsdrx` user service, and applies the kmsgrab/VAAPI workarounds (iHD path, DRM node
+permissions). Unpack on the guest and run `./install.sh`. Repack from an existing
+`.deb` with `make batocera` (no Docker). See [`packaging/batocera/README.md`](packaging/batocera/README.md).
+
 ### macOS
 
 ```bash

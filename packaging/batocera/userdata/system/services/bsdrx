@@ -1,0 +1,120 @@
+#!/bin/bash
+# Batocera user service: bsdrX. Filename has no .sh (batocera-services rules).
+# Lives on SHARE so it survives replacing the boot image — do not overlay this.
+#
+#   batocera-services enable bsdrx
+#   SYSTEM SETTINGS → SERVICES in EmulationStation
+
+BSDRX_BIN="${BSDRX_BIN:-/opt/bsdrX/bin/bsdr_agent}"
+BSDRX_OPT="${BSDRX_OPT:-/opt/bsdrX}"
+BSDRX_PERSIST="${BSDRX_PERSIST:-/userdata/opt/bsdrX}"
+BSDRX_ENV="/userdata/system/bsdrx/bsdrx.env"
+# Persist settings/session on SHARE (root's ~/.config is on the overlay).
+export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-/userdata/system/.config}"
+# --web-allow is appended as its own quoted argv (never via $BSDRX_ARGS:
+# eval + '*' globbed to /bin /boot /dev … and the CSRF guard 403'd LAN hosts).
+BSDRX_ARGS="${BSDRX_ARGS:---vaapi --kmsgrab --no-browser --web-bind 0.0.0.0 --web-port 8088}"
+PIDFILE="/var/run/bsdrx.pid"
+ARP_PIDFILE="/var/run/bsdrx-arp.pid"
+UDEV_RULE="/etc/udev/rules.d/99-bsdrx-uinput.rules"
+LOGFILE="/userdata/system/logs/bsdrx.log"
+ARP_LEARN="/userdata/system/bsdrx/learn-quest-arp.py"
+
+start() {
+  mkdir -p "${BSDRX_OPT}"
+  if [[ -x "${BSDRX_PERSIST}/bin/bsdr_agent" ]]; then
+    grep -q " ${BSDRX_OPT} " /proc/mounts || mount --bind "${BSDRX_PERSIST}" "${BSDRX_OPT}"
+  fi
+  [[ -d "${BSDRX_OPT}/lib/spa-0.2" ]] && export SPA_PLUGIN_DIR="${BSDRX_OPT}/lib/spa-0.2"
+  [[ -d "${BSDRX_OPT}/lib/pipewire-0.3" ]] && export PIPEWIRE_MODULE_DIR="${BSDRX_OPT}/lib/pipewire-0.3"
+  # Debian 12 libva (1.17) cannot load Batocera iHD (__vaDriverInit_1_0). RPATH
+  # wins over LD_LIBRARY_PATH, so stash the bundled copies and use /usr/lib.
+  if compgen -G "${BSDRX_OPT}/lib/libva.so*" >/dev/null; then
+    mkdir -p "${BSDRX_OPT}/lib/unused-libva"
+    mv ${BSDRX_OPT}/lib/libva.so* ${BSDRX_OPT}/lib/libva-drm.so* ${BSDRX_OPT}/lib/libva-x11.so* \
+      "${BSDRX_OPT}/lib/unused-libva/" 2>/dev/null || true
+  fi
+
+  modprobe uinput 2>/dev/null || true
+  # Overlay dies on Batocera upgrade — rewrite udev rule each start.
+  # Pointer has ABS_X/Y so the kernel also creates js1; tell udev it is a mouse.
+  cat > "${UDEV_RULE}" <<'EOF'
+KERNEL=="uinput", MODE="0660"
+ACTION=="add", KERNEL=="event*", ATTRS{name}=="bsdr-virtual-pointer", ENV{ID_INPUT_JOYSTICK}="0", ENV{ID_INPUT_MOUSE}="1"
+ACTION=="add", KERNEL=="event*", ATTRS{name}=="bsdr-virtual-touch", ENV{ID_INPUT_JOYSTICK}="0"
+EOF
+  udevadm control --reload-rules 2>/dev/null || true
+  udevadm trigger --name-match=uinput 2>/dev/null || true
+
+  # Bundled libssl is built with OPENSSLDIR=/opt/bsdrx-deps/etc/ssl (empty).
+  # Without a CA file, cloud HTTPS/WS dies and hangout input never arrives.
+  mkdir -p /opt/bsdrx-deps/etc/ssl
+  ln -sfn /etc/ssl/certs/ca-certificates.crt /opt/bsdrx-deps/etc/ssl/cert.pem
+
+  mkdir -p "${XDG_CONFIG_HOME}/bsdr_agent"
+
+  if [[ ! -x "${BSDRX_BIN}" ]]; then
+    echo "bsdrx: missing executable ${BSDRX_BIN}" >&2
+    echo "Unpack bsdr-agent_*_batocera.tar.gz and run install.sh (see packaging/batocera)." >&2
+    exit 1
+  fi
+
+  # shellcheck disable=SC1090
+  [[ -f "${BSDRX_ENV}" ]] && set -a && . "${BSDRX_ENV}" && set +a
+
+  export DISPLAY="${DISPLAY:-:0}"
+  export XDG_SESSION_TYPE=x11
+  unset WAYLAND_DISPLAY
+  export LIBVA_DRIVERS_PATH="${LIBVA_DRIVERS_PATH:-/usr/lib/va}"
+  export LIBVA_DRIVER_NAME="${LIBVA_DRIVER_NAME:-iHD}"
+  export SSL_CERT_FILE="${SSL_CERT_FILE:-/etc/ssl/certs/ca-certificates.crt}"
+
+  # Optional: Quest Wi-Fi never answers ARP; learn MAC from discovery broadcasts.
+  if [[ -f "${ARP_LEARN}" ]]; then
+    start-stop-daemon -K -p "${ARP_PIDFILE}" 2>/dev/null || true
+    start-stop-daemon -S -b -m -p "${ARP_PIDFILE}" -x "$(command -v python3)" -- "${ARP_LEARN}" eth0
+  fi
+  # Batocera ships iHD under /usr/lib/va; libva also probes /usr/lib/dri.
+  mkdir -p /usr/lib/dri
+  if [[ -e /usr/lib/va/iHD_drv_video.so ]]; then
+    ln -sfn /usr/lib/va/iHD_drv_video.so /usr/lib/dri/iHD_drv_video.so
+  fi
+  # kmsgrab opens the KMS node; X is DRM master. World-RW so the grab works
+  # even if setcap is missing (Batocera has no libcap).
+  chmod a+rw /dev/dri/card0 /dev/dri/renderD128 2>/dev/null || true
+  setcap cap_sys_admin,cap_sys_nice+ep "${BSDRX_BIN}" 2>/dev/null || true
+
+  mkdir -p "$(dirname "${LOGFILE}")"
+  # start-stop-daemon -b would send logs to /dev/null; keep them on SHARE.
+  # --web-allow '*' is quoted inside -c so the inner bash does not glob it.
+  # shellcheck disable=SC2086
+  start-stop-daemon -S -b -m -p "${PIDFILE}" --startas /bin/bash -- -c \
+    "exec \"${BSDRX_BIN}\" ${BSDRX_ARGS} --web-allow '*' >>\"${LOGFILE}\" 2>&1"
+  echo "bsdrx: started (${BSDRX_BIN}); panel http://0.0.0.0:8088 (LAN)"
+}
+
+stop() {
+  if [[ -f "${PIDFILE}" ]]; then
+    start-stop-daemon -K -p "${PIDFILE}" 2>/dev/null || true
+    rm -f "${PIDFILE}"
+  else
+    killall bsdr_agent 2>/dev/null || true
+  fi
+  start-stop-daemon -K -p "${ARP_PIDFILE}" 2>/dev/null || true
+  rm -f "${ARP_PIDFILE}"
+  echo "bsdrx: stopped"
+}
+
+case "${1:-}" in
+  start) start ;;
+  stop) stop ;;
+  restart|reload)
+    stop
+    start
+    ;;
+  *)
+    echo "Usage: $0 {start|stop|restart}" >&2
+    exit 1
+    ;;
+esac
+exit 0

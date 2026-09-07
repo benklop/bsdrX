@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # distribute.sh — clean the tree, then rebuild EVERY redistributable bundle into dist/:
 #
-#   dist/bsdrX.zip          Linux    AppImage + .deb     docker image  bsdrx-linux-deps
+#   dist/bsdrX.zip          Linux    AppImage + .deb + Batocera tarball  docker image  bsdrx-linux-deps
 #   dist/bsdrX-win.zip      Windows  .exe + FFmpeg DLLs  mingw-w64 (native, WIN_DEPS)
 #   dist/bsdrX-osx.zip      macOS    universal .app      docker image  bsdrx-osx-full (osxcross)
 #   dist/bsdrX-android.apk  Android  APK                 gradle + NDK (native, ANDROID_HOME)
@@ -97,6 +97,8 @@ NC=""; [ "$NO_CACHE" = 1 ] && NC="--no-cache"
 # ---- platform selection ------------------------------------------------------
 ALL=(linux windows osx android relay)
 SEL=("$@"); [ ${#SEL[@]} -gt 0 ] || SEL=("${ALL[@]}")
+# batocera is the SHARE tarball emitted by the linux bundle (or `make batocera`).
+for i in "${!SEL[@]}"; do [ "${SEL[$i]}" = batocera ] && SEL[$i]=linux; done
 declare -A WANT
 # In plugins-only mode no app bundle is built (just the native loadable plugins).
 if [ "$PLUGINS_ONLY" = 1 ]; then WANT=(); else
@@ -193,10 +195,10 @@ docker_ok(){
 }
 
 # =============================================================================
-# Linux : AppImage + deb  (self-contained docker image)
+# Linux : AppImage + deb + Batocera tarball  (self-contained docker image)
 # =============================================================================
 build_linux(){
-  banner "Linux bundle  ->  dist/bsdrX.zip"
+  banner "Linux bundle  ->  dist/bsdrX.zip + batocera tarball"
   local t0=$SECONDS
   if ! docker_ok; then err "docker not available/running — cannot build the Linux bundle"; record linux SKIP "docker unavailable"; return; fi
   if [ -n "$NC" ] || ! $DOCKER image inspect "$LINUX_IMAGE" >/dev/null 2>&1; then
@@ -433,7 +435,7 @@ for r in "${RESULTS[@]}"; do
   esac
 done
 printf '\n%sArtifacts in %s:%s\n' "$B" "$DIST" "$Z"
-for f in "bsdrX-$VERSION.zip" "bsdrX-win-$VERSION.zip" "bsdrX-osx-$VERSION.zip" "bsdrX-android-$VERSION.apk" "bsdrX-$VERSION-x86_64.AppImage" bsdr-agent_"${VERSION#v}"_amd64.deb bsdrX_relay.zip; do
+for f in "bsdrX-$VERSION.zip" "bsdrX-win-$VERSION.zip" "bsdrX-osx-$VERSION.zip" "bsdrX-android-$VERSION.apk" "bsdrX-$VERSION-x86_64.AppImage" bsdr-agent_"${VERSION#v}"_amd64.deb bsdr-agent_"${VERSION#v}"_batocera.tar.gz bsdrX_relay.zip; do
   [ -f "$DIST/$f" ] && printf '  %-28s %s\n' "$f" "$(du -h "$DIST/$f" | cut -f1)"
 done
 # per-plugin packages (one each; names are dynamic)
