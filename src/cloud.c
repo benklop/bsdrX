@@ -349,7 +349,6 @@ bool bsdr_cloud_renew(const char *api_key, const char *refresh_token, bsdr_cloud
 }
 
 bool bsdr_cloud_get_rooms(const char *access_token, bsdr_cloud_screen *out) {
-    static int logged_no_screen;   /* one INFO line until a screen appears (body stays off INFO) */
     memset(out, 0, sizeof(*out));
     char req[4096];
     snprintf(req, sizeof(req),
@@ -368,7 +367,9 @@ bool bsdr_cloud_get_rooms(const char *access_token, bsdr_cloud_screen *out) {
     const char *body = strstr(resp, "\r\n\r\n");
     if (code / 100 != 2 || !body) { BSDR_WARN("bsdr.cloud", "GET /rooms -> HTTP %d", code); return false; }
     body += 4;
-    bsdr_json_get_str(body, "socialId", out->social_id, sizeof(out->social_id));  /* ownerSocialProfile */
+    /* Raw body so we can verify the flat-key parse grabs the PRODUCE videoPort (mediaPeer),
+     * not a consume/other port, and inspect producerId fields. */
+    BSDR_INFO("bsdr.cloud", "GET /rooms body (%d B): %.6000s", (int)strlen(body), body);
     /* flat-key search finds the first screen's mediaPeer/mediaServer fields */
     double v;
     if (bsdr_json_get_str(body, "ipAddress", out->media_ip, sizeof(out->media_ip)) &&
@@ -381,7 +382,6 @@ bool bsdr_cloud_get_rooms(const char *access_token, bsdr_cloud_screen *out) {
         bsdr_json_get_str(body, "userSessionId", out->session_id, sizeof(out->session_id));
         bsdr_json_get_str(body, "preferredUserType", out->user_type, sizeof(out->user_type));  /* bot-join policy */
         out->found = true;
-        logged_no_screen = 0;
         BSDR_INFO("bsdr.cloud", "rooms: relay %s video=%d audio=%d mic=%d data=%d session=%s",
                   out->media_ip, out->video_port, out->audio_port, out->mic_port,
                   out->data_port, out->session_id);
@@ -391,10 +391,9 @@ bool bsdr_cloud_get_rooms(const char *access_token, bsdr_cloud_screen *out) {
      * the companion/bsdrX only push media to an existing one — an empty screens[] is expected until
      * the operator shares the remote desktop INTO the room from the Quest. See the identity/screen
      * ownership notes: RDC "can't function as a stand alone streamer". */
-    if (!logged_no_screen) {
-        BSDR_INFO("bsdr.cloud", "rooms: no shared screen yet — share the remote desktop INTO the room from the Quest");
-        logged_no_screen = 1;
-    }
+    BSDR_INFO("bsdr.cloud", "rooms: room has no shared screen yet — on the Quest, share the remote "
+              "desktop INTO this room (only the Quest can add it; the PC just pushes video to it)");
+    BSDR_DEBUG("bsdr.cloud", "GET /rooms body (%d B): %.1500s", (int)strlen(body), body);
     return true;   /* connected OK, just no Quest-added screen in the room yet */
 }
 
@@ -861,7 +860,7 @@ int bsdr_cloud_get_participants(const char *access_token, const char *room_id,
 
 /* ---- WS presence ---- */
 #include "bsdr/platform.h"
-struct bsdr_cloud_ws { SSL_CTX *ctx; BIO *bio; bsdr_thread *thr; volatile int stop; };
+struct bsdr_cloud_ws { SSL_CTX *ctx; BIO *bio; bsdr_thread *thr; volatile int stop; volatile int alive; };
 /* Minimal MessagePack -> JSON-ish pretty-printer. Appends one MP object at p into (out,*ow)
  * bounded by outcap; returns bytes consumed from p, or -1 on truncation/error. Enough to read
  * the room signaling (maps/arrays/str/int/float/bool/nil/bin). */
@@ -970,6 +969,9 @@ static void ws_keepalive(void *arg) {
         }
         if (off > 0) { memmove(buf, buf + off, blen - off); blen -= off; }
     }
+    /* Thread exited: either close() set stop, or the socket dropped (BIO_read failed without
+     * BIO_should_retry). Either way the presence socket is no longer live. */
+    w->alive = 0;
     free(buf);
 }
 bsdr_cloud_ws *bsdr_cloud_ws_open(const char *access_token, int client_mode) {
@@ -1001,6 +1003,7 @@ bsdr_cloud_ws *bsdr_cloud_ws_open(const char *access_token, int client_mode) {
     struct bsdr_cloud_ws *w = calloc(1, sizeof(*w));
     if (!w) goto fail;
     w->ctx = ctx; w->bio = bio;
+    w->alive = 1;
     w->thr = bsdr_thread_start(ws_keepalive, w);
     BSDR_INFO("bsdr.cloud", "WS presence connected to %s (host online)", BSDR_CLOUD_WS_HOST);
     return w;
@@ -1023,4 +1026,27 @@ void bsdr_cloud_ws_close(bsdr_cloud_ws *w) {
     }
     if (w->thr) bsdr_thread_join(w->thr);
     BIO_free_all(w->bio); SSL_CTX_free(w->ctx); free(w);
+}
+
+/* 1 while the keepalive thread is still on a live socket. 0 if NULL, server-closed, or dropped. */
+int bsdr_cloud_ws_alive(const bsdr_cloud_ws *ws) {
+    if (!ws) return 0;
+    return ((const struct bsdr_cloud_ws *)ws)->alive;
+}
+
+/* 1 if GET /rooms HTTP 5xx should force a presence WS reconnect (debounced).
+ * 401/403 means the access token expired — that is fixed by renewing, not by reopening the WS, so
+ * those never reopen. A 5xx means the WS is stuck on a dead/expired token, so we reopen — but only
+ * once per reopen window (presence_reopen_ms) so a 1s poll tick doesn't hammer the server. */
+int bsdr_cloud_presence_retry_5xx(int http_status, uint64_t last_reopen_ms, uint64_t now_ms) {
+    if (http_status < 500 || http_status >= 600) return 0;   /* only 5xx */
+    if (http_status == 401 || http_status == 403) return 0;  /* token expiry -> renew, not reopen */
+    if (last_reopen_ms == 0) return 1;                       /* never reopened yet -> go */
+    return now_ms - last_reopen_ms >= 15000;                 /* debounce: >= 15 s since last reopen */
+}
+
+/* 1 when an access token should be renewed: unknown issue time (0), or older than 10 min. */
+int bsdr_cloud_token_refresh_due(uint64_t issued_ms, uint64_t now_ms) {
+    if (issued_ms == 0) return 1;
+    return now_ms - issued_ms >= 10u * 60u * 1000u;
 }

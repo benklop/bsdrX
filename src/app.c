@@ -1544,6 +1544,7 @@ bool bsdr_app_login(bsdr_app *a, const char *email, const char *password) {
     if (ok) {
         snprintf(a->access_token, sizeof(a->access_token), "%s", res.access_token);
         snprintf(a->refresh_token, sizeof(a->refresh_token), "%s", res.refresh_token);
+        a->host_token_ms = bsdr_now_ms();
         snprintf(a->cloud_name, sizeof(a->cloud_name), "%s", name[0] ? name : email);
     }
     bsdr_mutex_unlock(a->lock);
@@ -1609,6 +1610,7 @@ bool bsdr_app_restore_session(bsdr_app *a) {
     a->cloud_logged_in = true;
     snprintf(a->access_token, sizeof(a->access_token), "%s", access);
     snprintf(a->refresh_token, sizeof(a->refresh_token), "%s", refresh);
+    a->host_token_ms = valid ? bsdr_now_ms() : 0;
     snprintf(a->cloud_email, sizeof(a->cloud_email), "%s", email);
     snprintf(a->cloud_name, sizeof(a->cloud_name), "%s", vname[0] ? vname : (name[0] ? name : email));
     snprintf(a->cloud_msg, sizeof(a->cloud_msg), valid ? "logged in (restored)" : "restored (offline — re-verifying)");
@@ -2354,6 +2356,42 @@ void bsdr_app_bot_follow_tick(bsdr_app *a) {
     #undef FOLLOW_CONFIRM
 }
 
+/* Close the host presence WS (if any) and open a new one with the current access token.
+ * REST renew leaves the old socket on the expired token; Bigscreen then 500s GET /rooms
+ * and the Quest sits on "waiting for remote desktop". */
+static void presence_reopen(bsdr_app *a) {
+    char token[2048];
+    bsdr_mutex_lock(a->lock);
+    snprintf(token, sizeof token, "%s", a->access_token);
+    bsdr_cloud_ws *old = a->cloud_ws;
+    a->cloud_ws = NULL;
+    a->presence_reopen_ms = bsdr_now_ms();
+    int still = a->cloud_logged_in;
+    bsdr_mutex_unlock(a->lock);
+    if (old) bsdr_cloud_ws_close(old);
+    if (!still || !token[0]) return;
+    bsdr_cloud_ws *ws = bsdr_cloud_ws_open(token, 0);
+    bsdr_mutex_lock(a->lock);
+    if (a->cloud_logged_in && !a->cloud_ws) a->cloud_ws = ws;
+    else { bsdr_mutex_unlock(a->lock); if (ws) bsdr_cloud_ws_close(ws); return; }
+    bsdr_mutex_unlock(a->lock);
+    if (!ws) BSDR_WARN("bsdr.app", "presence WS reconnect failed");
+}
+
+static void presence_ensure(bsdr_app *a) {
+    uint64_t last, now = bsdr_now_ms();
+    bsdr_mutex_lock(a->lock);
+    int logged = a->cloud_logged_in;
+    bsdr_cloud_ws *ws = a->cloud_ws;
+    last = a->presence_reopen_ms;
+    bsdr_mutex_unlock(a->lock);
+    if (!logged) return;
+    if (bsdr_cloud_ws_alive(ws)) return;
+    if (last && now - last < 15000) return;   /* last reopen still in flight / just failed */
+    BSDR_WARN("bsdr.app", "presence WS down — reconnecting");
+    presence_reopen(a);
+}
+
 /* Renew the cloud access token using the stored refresh token (the access token is short-lived;
  * mid-session it expires and /rooms starts returning 401/403). Updates + persists the new token. */
 static bool app_renew_token(bsdr_app *a) {
@@ -2368,9 +2406,11 @@ static bool app_renew_token(bsdr_app *a) {
     if (!a->cloud_logged_in) { bsdr_mutex_unlock(a->lock); return false; }   /* logged out while HTTPS ran */
     snprintf(a->access_token, sizeof(a->access_token), "%s", rr.access_token);
     if (rr.refresh_token[0]) snprintf(a->refresh_token, sizeof(a->refresh_token), "%s", rr.refresh_token);
+    a->host_token_ms = bsdr_now_ms();
     bsdr_mutex_unlock(a->lock);
     session_save(a);
     BSDR_INFO("bsdr.app", "cloud token renewed (was expired)");
+    presence_reopen(a);   /* old WS still carries the expired token */
     return true;
 }
 
@@ -2408,8 +2448,47 @@ void bsdr_app_bot_token_tick(bsdr_app *a) {
     bsdr_mutex_unlock(a->lock);
     if (!go) return;
     uint64_t now = bsdr_now_ms();
-    if (issued != 0 && now - issued < 10u * 60u * 1000u) return;   /* still fresh */
+    if (!bsdr_cloud_token_refresh_due(issued, now)) return;
     bot_renew_token(a);   /* refreshes bot_token_ms on success */
+}
+
+void bsdr_app_host_token_tick(bsdr_app *a) {
+    if (!a) return;
+    uint64_t issued; int go;
+    bsdr_mutex_lock(a->lock);
+    go = a->cloud_logged_in && a->refresh_token[0];
+    issued = a->host_token_ms;
+    bsdr_mutex_unlock(a->lock);
+    if (!go) return;
+    if (!bsdr_cloud_token_refresh_due(issued, bsdr_now_ms())) return;
+    app_renew_token(a);
+}
+
+/* GET /rooms, renewing an expired token and reconnecting presence on Bigscreen 5xx. */
+static bool rooms_fetch(bsdr_app *a, char *token, size_t tokencap, bsdr_cloud_screen *scr) {
+    memset(scr, 0, sizeof *scr);
+    bool ok = bsdr_cloud_get_rooms(token, scr) && scr->found;
+    if (!ok && (scr->http_status == 401 || scr->http_status == 403) && app_renew_token(a)) {
+        bsdr_mutex_lock(a->lock);
+        snprintf(token, tokencap, "%s", a->access_token);
+        bsdr_mutex_unlock(a->lock);
+        memset(scr, 0, sizeof *scr);
+        ok = bsdr_cloud_get_rooms(token, scr) && scr->found;
+    }
+    uint64_t last;
+    bsdr_mutex_lock(a->lock);
+    last = a->presence_reopen_ms;
+    bsdr_mutex_unlock(a->lock);
+    if (!ok && bsdr_cloud_presence_retry_5xx(scr->http_status, last, bsdr_now_ms())) {
+        BSDR_WARN("bsdr.app", "GET /rooms HTTP %d — reconnecting presence WS", scr->http_status);
+        presence_reopen(a);
+        bsdr_mutex_lock(a->lock);
+        snprintf(token, tokencap, "%s", a->access_token);
+        bsdr_mutex_unlock(a->lock);
+        memset(scr, 0, sizeof *scr);
+        ok = bsdr_cloud_get_rooms(token, scr) && scr->found;
+    }
+    return ok;
 }
 
 /* Reconcile internet sharing: DESIRED state = a->internet_sharing (set by the Quest's
@@ -2437,13 +2516,14 @@ static void cloud_try_start(bsdr_app *a) {
         return;
     }
     if (!logged) return;
+    presence_ensure(a);   /* dropped overnight WS → host looks offline, Quest waits for RD */
 
     /* Desired ON and we already have a stream: if it's paused, decide resume vs restart by
      * re-reading /rooms — same relay tuple → just resume; changed → drop it (next tick restarts). */
     if (cs) {
         if (bsdr_cloud_stream_active(cs)) return;          /* already actively streaming */
         bsdr_cloud_screen rs;
-        bool okr = bsdr_cloud_get_rooms(token, &rs) && rs.found && rs.video_port > 0 && rs.session_id[0];
+        bool okr = rooms_fetch(a, token, sizeof token, &rs) && rs.found && rs.video_port > 0 && rs.session_id[0];
         if (okr && bsdr_cloud_stream_matches(cs, &rs)) {
             bsdr_cloud_stream_set_active(cs, 1);           /* RESUME — same relay, connection still up */
             return;
@@ -2469,14 +2549,7 @@ static void cloud_try_start(bsdr_app *a) {
     if (!claim) return;
 
     bsdr_cloud_screen scr;
-    bool ok = bsdr_cloud_get_rooms(token, &scr) && scr.found;
-    /* token expired mid-session → /rooms 401/403. Renew with the refresh token and retry once. */
-    if (!ok && (scr.http_status == 401 || scr.http_status == 403) && app_renew_token(a)) {
-        bsdr_mutex_lock(a->lock);
-        snprintf(token, sizeof(token), "%s", a->access_token);
-        bsdr_mutex_unlock(a->lock);
-        ok = bsdr_cloud_get_rooms(token, &scr) && scr.found;
-    }
+    bool ok = rooms_fetch(a, token, sizeof token, &scr) && scr.found;
     /* Guard against a half-published / stale screen: without a usable video port and a
      * userSessionId the SSRC (djb2(sessionId)) and comedia target are wrong and the SFU
      * silently drops the whole session. Treat as "not ready" so the next tick re-reads. */

@@ -1937,6 +1937,7 @@ int bsdr_agent_run(const bsdr_agent_options *opt) {
             follow_ctr = 0;
             bsdr_app_bot_follow_tick(&app);
             bsdr_app_bot_token_tick(&app);        /* keep the bot token fresh (renews ~every 10 min) */
+            bsdr_app_host_token_tick(&app);       /* host companion token dies in ~15 min without this */
         }
         if (++tick >= 25) {                       /* ~5 s heartbeat-expiry check */
             tick = 0;

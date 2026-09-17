@@ -169,5 +169,11 @@ typedef struct bsdr_cloud_ws bsdr_cloud_ws;
 /* client_mode: 0 = companion system-info (host), 1 = client system-info (bot). */
 bsdr_cloud_ws *bsdr_cloud_ws_open(const char *access_token, int client_mode);
 void bsdr_cloud_ws_close(bsdr_cloud_ws *ws);
+/* 1 while the keepalive thread is still on a live socket. 0 if NULL, server-closed, or dropped. */
+int bsdr_cloud_ws_alive(const bsdr_cloud_ws *ws);
+/* 1 if GET /rooms HTTP 5xx should force a presence WS reconnect (debounced). */
+int bsdr_cloud_presence_retry_5xx(int http_status, uint64_t last_reopen_ms, uint64_t now_ms);
+/* 1 when an access token should be renewed (unknown issue time, or older than 10 min). */
+int bsdr_cloud_token_refresh_due(uint64_t issued_ms, uint64_t now_ms);
 
 #endif /* BSDR_CLOUD_H */

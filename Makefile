@@ -267,7 +267,7 @@ TESTS := $(BUILD)/test_input_decode$(EXEEXT) $(BUILD)/test_pads$(EXEEXT) $(BUILD
          $(BUILD)/test_acl$(EXEEXT) $(BUILD)/test_roster$(EXEEXT) $(BUILD)/test_audio_policy$(EXEEXT) \
          $(BUILD)/test_tools$(EXEEXT) $(BUILD)/test_moderation$(EXEEXT) \
          $(BUILD)/test_botprompt$(EXEEXT) $(BUILD)/test_llmctx$(EXEEXT) \
-         $(BUILD)/test_updatecheck$(EXEEXT) $(BUILD)/test_toolregistry$(EXEEXT) $(BUILD)/test_botsense$(EXEEXT) $(BUILD)/test_mediafx$(EXEEXT)
+         $(BUILD)/test_updatecheck$(EXEEXT) $(BUILD)/test_cloud_presence$(EXEEXT) $(BUILD)/test_toolregistry$(EXEEXT) $(BUILD)/test_botsense$(EXEEXT) $(BUILD)/test_mediafx$(EXEEXT)
 ifneq ($(strip $(SCTP_SRC)),)
   TESTS += $(BUILD)/test_datachannel$(EXEEXT)
 endif

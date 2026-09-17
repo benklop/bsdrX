@@ -1,0 +1,60 @@
+# Linux AppImage + .deb — same container path as `make appimage` / `./distribute.sh linux`.
+# Image: scripts/linux-bundle.Dockerfile (debian:12-slim). Keys stay as in the tree
+# (blank on the public mirror); this does not run fetch-cloud-key.sh.
+name: Linux bundle
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: linux-bundle-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build linux-deps image
+        uses: docker/build-push-action@v6
+        with:
+          context: scripts
+          file: scripts/linux-bundle.Dockerfile
+          tags: bsdrx-linux-deps:latest
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build AppImage and .deb
+        run: ./distribute.sh linux
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-bundle
+          if-no-files-found: error
+          path: |
+            dist/bsdrX-*.zip
+            dist/bsdrX-*-x86_64.AppImage
+            dist/bsdr-agent_*_amd64.deb
+
+      - name: Attach to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --generate-notes --verify-tag \
+            dist/bsdrX-*.zip dist/bsdrX-*-x86_64.AppImage dist/bsdr-agent_*_amd64.deb \
+            || gh release upload "$GITHUB_REF_NAME" --clobber \
+                 dist/bsdrX-*.zip dist/bsdrX-*-x86_64.AppImage dist/bsdr-agent_*_amd64.deb

@@ -45,6 +45,7 @@ typedef struct bsdr_app {
     char cloud_msg[160];
     char access_token[2048];
     char refresh_token[2048];     /* for re-login at startup without a password */
+    uint64_t host_token_ms;       /* last host access-token issue/renew (0 = unknown → renew soon) */
     /* Second "bot" account — its own login + presence WS + room-join, independent of the host session
      * (no media). Used to satisfy the Quest owner-mic gate (Room.participants > 1) by sitting in the
      * host's room, and as the base for future in-room moderation. */
@@ -136,6 +137,7 @@ typedef struct bsdr_app {
     bool cloud_starting;          /* a stream-start is in flight (prevents a double-start race) */
     bool unpair_pending;          /* Quest unpaired (or heartbeat lost) — cloud teardown is on a grace timer */
     uint64_t unpair_deadline_ms;  /* when the grace expires and we actually stop the relay (0 = none) */
+    uint64_t presence_reopen_ms;  /* last host presence WS (re)open — debounce /rooms 5xx reconnects */
     char cloud_data_mode[8];      /* "" (auto) | "raw" | "dtls" — cloud data channel transport */
     char cloud_dtls_role[8];      /* "" (auto) | "client" | "server" — cloud data DTLS role */
     bool cloud_no_video;          /* --no-cloud-video: don't produce relay video (default: video ON) */
@@ -453,6 +455,7 @@ void bsdr_app_set_bot_solo_owner(bsdr_app *a, bool on);
  * the bot is logged in and not stopped. */
 void bsdr_app_bot_follow_tick(bsdr_app *a);
 void bsdr_app_bot_token_tick(bsdr_app *a);   /* proactive bot-token renewal (call periodically) */
+void bsdr_app_host_token_tick(bsdr_app *a);  /* same for the host companion token (~15 min life) */
 /* Toggle the performance encoder preset (lighter CPU/GPU vs the default quality preset). Persisted;
  * takes effect on the next stream (re)start. */
 void bsdr_app_set_enc_level(bsdr_app *a, int level);   /* 0 quality / 1 balanced / 2 performance */
