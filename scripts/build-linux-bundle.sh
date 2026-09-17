@@ -169,7 +169,13 @@ cat > "$APPDIR/usr/share/metainfo/$APPID.appdata.xml" <<EOF
     </p>
   </description>
   <launchable type="desktop-id">net.nexlab.bsdrX.desktop</launchable>
-  <url type="homepage">https://git.nexlab.net/nextime/bsdrX</url>
+  <!--
+    Homepage points at the fork's GitHub releases, not the upstream git.nexlab.net
+    mirror: that host's TLS certificate has expired, which makes appstreamcli (run
+    by linuxdeploy during AppImage validation) fail with "server certificate
+    verification failed" and abort the whole bundle build. GitHub's cert is valid.
+  -->
+  <url type="homepage">https://github.com/benklop/bsdrX/releases</url>
   <developer_name>Stefy Lanza (nexlab)</developer_name>
   <content_rating type="oars-1.1"/>
   <releases>

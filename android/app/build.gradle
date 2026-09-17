@@ -13,7 +13,7 @@ android {
         minSdk 29                 // AudioPlaybackCapture (system audio)
         targetSdk 34
         versionCode 9
-        versionName '0.3.3'       // bsdrX release version (the Bigscreen protocol version is separate)
+        versionName '0.3.4'       // bsdrX release version (the Bigscreen protocol version is separate)
 
         ndk { abiFilters 'arm64-v8a' }   // add 'x86_64' for the emulator
         externalNativeBuild { cmake { arguments '-DANDROID_STL=c++_shared' } }
